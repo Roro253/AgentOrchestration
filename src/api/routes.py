@@ -1,22 +1,31 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, HTTPException, Request
+from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.auth import AuthorizationError, template_authorization
+from src.api.templates import template_service
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +62,32 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.post("/templates/{template_id}/clone")
+async def clone_template(template_id: str, request: Request, payload: Dict):
+    workspace_id = payload.get("workspace_id")
+    clone_name = payload.get("name", f"{template_id}-clone")
+    if not isinstance(workspace_id, str) or not workspace_id.strip():
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    if not isinstance(clone_name, str) or not clone_name.strip():
+        raise HTTPException(status_code=400, detail="name must be a string")
+
+    try:
+        clone = template_service.clone_template(
+            template_id=template_id,
+            workspace_id=workspace_id,
+            clone_name=clone_name,
+            headers=request.headers,
+            cookies=request.cookies,
+            authorization=template_authorization,
+        )
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    return {"clone": clone}
 
 # 2019-03-18T11:10:18 update
 
