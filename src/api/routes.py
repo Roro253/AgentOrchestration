@@ -1,22 +1,38 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from typing import Dict, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.approvals import (
+    ApprovalInvalidRunState,
+    ApprovalMalformed,
+    ApprovalNotFound,
+    ApprovalService,
+    ApprovalUnauthorized,
+    get_approval_service,
+)
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +69,52 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+def _approval_scope(
+    x_workspace_id: Optional[str] = Header(
+        default=None,
+        alias="X-Workspace-ID",
+    ),
+    x_role: Optional[str] = Header(default=None, alias="X-Role"),
+) -> Dict[str, str]:
+    return {
+        "workspace_id": x_workspace_id or "",
+        "role": x_role or "",
+    }
+
+
+@router.post("/runs/{run_id}/steps/{step_id}/approve")
+async def approve_human_step(
+    run_id: str,
+    step_id: str,
+    scope: Dict[str, str] = Depends(_approval_scope),
+    service: ApprovalService = Depends(get_approval_service),
+):
+    try:
+        step = service.approve_step(
+            run_id=run_id,
+            step_id=step_id,
+            workspace_id=scope["workspace_id"],
+            role=scope["role"],
+        )
+    except ApprovalMalformed:
+        raise HTTPException(status_code=400, detail="Invalid approval request")
+    except ApprovalUnauthorized:
+        raise HTTPException(status_code=403, detail="Approval access denied")
+    except ApprovalNotFound:
+        raise HTTPException(status_code=404, detail="Approval step not found")
+    except ApprovalInvalidRunState:
+        raise HTTPException(
+            status_code=409,
+            detail="Run is not waiting for human approval",
+        )
+
+    return {
+        "run_id": step.run_id,
+        "step_id": step.step_id,
+        "status": "approved",
+    }
 
 # 2019-03-18T11:10:18 update
 
