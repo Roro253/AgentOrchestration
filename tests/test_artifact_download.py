@@ -73,6 +73,52 @@ def test_artifact_download_returns_404_for_cross_workspace_lookup():
     assert service.protected_lookup_count == 0
 
 
+def test_artifact_download_returns_404_for_cross_project_lookup():
+    service = ArtifactDownloadService(
+        [
+            ArtifactRecord(
+                artifact_id="artifact-1",
+                project_id="project-1",
+                workspace_id="workspace-a",
+                content=b"project 1 secret report",
+            )
+        ]
+    )
+    client = _client_with(service)
+
+    response = client.get(
+        "/api/v2/projects/project-2/artifacts/artifact-1/download",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Artifact not found"
+    assert service.protected_lookup_count == 0
+
+
+def test_artifact_download_rejects_missing_auth_before_lookup():
+    service = ArtifactDownloadService(
+        [
+            ArtifactRecord(
+                artifact_id="artifact-1",
+                project_id="project-1",
+                workspace_id="workspace-a",
+                content=b"secret report",
+            )
+        ]
+    )
+    client = _client_with(service)
+
+    response = client.get(
+        "/api/v2/projects/project-1/artifacts/artifact-1/download",
+        headers={"X-Workspace-ID": "workspace-a", "X-Role": "viewer"},
+    )
+
+    assert response.status_code == 401
+    assert response.text == "Unauthorized"
+    assert service.protected_lookup_count == 0
+
+
 def test_artifact_download_rejects_malformed_scope_before_lookup():
     service = ArtifactDownloadService(
         [
