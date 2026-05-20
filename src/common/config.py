@@ -49,11 +49,14 @@ class Config:
     def get_int(
         self,
         key: str,
-        default: Optional[int] = None,
+        default: Any = None,
     ) -> Optional[int]:
         value = self.get(key, default)
         if value is None:
             return None
+        return self._coerce_int(key, value)
+
+    def _coerce_int(self, key: str, value: Any) -> int:
         if isinstance(value, bool):
             raise ConfigurationError(
                 f"{key} must be an integer, not a boolean"

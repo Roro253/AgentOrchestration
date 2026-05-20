@@ -56,7 +56,15 @@ class TestConfig:
         config = Config()
 
         assert config.get_int("limits.missing", default=7) == 7
+        assert config.get_int("limits.missing", default="  -2 ") == -2
         assert config.get_int("limits.missing") is None
+
+    @pytest.mark.parametrize("default", ["4.5", "eight", True, object()])
+    def test_get_int_rejects_invalid_default_for_missing_key(self, default):
+        config = Config()
+
+        with pytest.raises(ConfigurationError, match="limits.missing"):
+            config.get_int("limits.missing", default=default)
 
     @pytest.mark.parametrize("value", ["", "4.5", "eight", object()])
     def test_get_int_rejects_invalid_values(self, value):
