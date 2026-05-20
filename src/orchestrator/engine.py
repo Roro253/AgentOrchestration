@@ -3,12 +3,33 @@
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from src.agent import AgentRegistry, AgentStatus
 from src.orchestrator.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
+
+
+class TaskExecutionLockManager:
+    def __init__(self):
+        self._guard = asyncio.Lock()
+        self._locked_task_ids = set()
+
+    async def acquire(self, task_id: str) -> bool:
+        async with self._guard:
+            if task_id in self._locked_task_ids:
+                return False
+            self._locked_task_ids.add(task_id)
+            return True
+
+    async def release(self, task_id: str) -> None:
+        async with self._guard:
+            self._locked_task_ids.discard(task_id)
+
+    async def is_locked(self, task_id: str) -> bool:
+        async with self._guard:
+            return task_id in self._locked_task_ids
 
 
 class OrchestrationEngine:
@@ -17,6 +38,7 @@ class OrchestrationEngine:
         self.scheduler = TaskScheduler()
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.agent_timeout = agent_timeout
+        self.lock_manager = TaskExecutionLockManager()
         self._running = False
         self._hooks: Dict[str, List[Callable]] = {
             "pre_execute": [],
@@ -45,12 +67,19 @@ class OrchestrationEngine:
     async def _execute_task(self, task: Dict[str, Any]) -> None:
         task_id = task["id"]
         agent_id = task["target_agent"]
+        if not await self.lock_manager.acquire(task_id):
+            logger.warning(
+                f"Task {task_id} is already executing; "
+                "skipping duplicate dispatch"
+            )
+            return
+
         logger.info(f"Executing task {task_id} on agent {agent_id}")
 
-        for hook in self._hooks["pre_execute"]:
-            await hook(task)
-
         try:
+            for hook in self._hooks["pre_execute"]:
+                await hook(task)
+
             agent = self.registry.get(agent_id)
             if not agent:
                 raise ValueError(f"Agent {agent_id} not found")
@@ -65,12 +94,16 @@ class OrchestrationEngine:
             for hook in self._hooks["post_execute"]:
                 await hook(task, result)
 
+            self.scheduler.complete(task_id)
             logger.info(f"Task {task_id} completed successfully")
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+            self.scheduler.fail(task_id)
+        finally:
+            await self.lock_manager.release(task_id)
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
@@ -82,7 +115,10 @@ class OrchestrationEngine:
         )
 
     def _execute_in_thread(self, agent: Dict, task: Dict) -> Any:
-        return {"status": "completed", "output": f"Task {task['id']} processed by {agent['name']}"}
+        return {
+            "status": "completed",
+            "output": f"Task {task['id']} processed by {agent['name']}",
+        }
 
 # 2019-04-24T14:55:39 update
 

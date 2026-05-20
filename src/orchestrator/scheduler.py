@@ -1,6 +1,5 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
 from typing import Any, Dict, Optional
@@ -37,24 +36,40 @@ class TaskScheduler:
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task["retries"] = task.get("retries", 0)
+        task["priority"] = priority
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
