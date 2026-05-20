@@ -1,0 +1,129 @@
+import asyncio
+import logging
+
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from starlette.requests import Request as StarletteRequest
+
+from src.api.middleware import (
+    AUDIT_ACTOR_HEADER,
+    AUDIT_STATUS_HEADER,
+    AuthMiddleware,
+)
+
+
+def test_authenticated_request_attaches_sanitized_audit_actor(caplog):
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/api/v2/agents")
+    async def read_agents(request: Request):
+        return {
+            "actor": request.state.audit_actor,
+            "authenticated": request.state.audit_authenticated,
+        }
+
+    client = TestClient(app)
+    with caplog.at_level(logging.INFO, logger="src.api.middleware"):
+        response = client.get(
+            "/api/v2/agents?token=must-not-log",
+            headers={
+                "Authorization": "Bearer raw-secret-token",
+                "X-Audit-Actor": "user-123",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "actor": "user-123",
+        "authenticated": True,
+    }
+    assert response.headers[AUDIT_ACTOR_HEADER] == "user-123"
+    assert response.headers[AUDIT_STATUS_HEADER] == "authenticated"
+    assert "raw-secret-token" not in caplog.text
+    assert "must-not-log" not in caplog.text
+
+
+def test_rejected_request_does_not_attach_audit_actor():
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    called = {"handler": False}
+
+    @app.get("/api/v2/agents")
+    async def read_agents(request: Request):
+        called["handler"] = True
+        return {"actor": request.state.audit_actor}
+
+    client = TestClient(app)
+    response = client.get("/api/v2/agents")
+
+    assert response.status_code == 401
+    assert response.headers[AUDIT_STATUS_HEADER] == "rejected"
+    assert AUDIT_ACTOR_HEADER not in response.headers
+    assert not called["handler"]
+
+
+def test_invalid_actor_fails_closed_before_handler():
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    called = {"handler": False}
+
+    @app.post("/api/v2/agents")
+    async def create_agent(request: Request):
+        called["handler"] = True
+        return {"actor": request.state.audit_actor}
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v2/agents",
+        headers={
+            "Authorization": "Bearer raw-secret-token",
+            "X-Audit-Actor": "bad actor with spaces",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers[AUDIT_STATUS_HEADER] == "rejected"
+    assert AUDIT_ACTOR_HEADER not in response.headers
+    assert "raw-secret-token" not in response.text
+    assert not called["handler"]
+
+
+def test_exception_path_clears_request_local_audit_state(caplog):
+    async def run_exception_path():
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v2/fail",
+            "headers": [
+                (b"authorization", b"Bearer exception-secret-token"),
+                (b"x-audit-actor", b"user-123"),
+            ],
+            "query_string": b"secret=must-not-log",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 5000),
+        }
+        request = StarletteRequest(scope)
+        middleware = AuthMiddleware(app=lambda scope, receive, send: None)
+
+        async def call_next(request):
+            assert request.state.audit_actor == "user-123"
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            await middleware.dispatch(request, call_next)
+
+        assert getattr(request.state, "audit_actor", None) is None
+        assert getattr(request.state, "audit_authenticated", None) is None
+
+    with caplog.at_level(logging.INFO, logger="src.api.middleware"):
+        asyncio.run(run_exception_path())
+
+    assert "exception-secret-token" not in caplog.text
+    assert "must-not-log" not in caplog.text
+    assert any(
+        getattr(record, "audit_actor", None) == "user-123"
+        for record in caplog.records
+    )

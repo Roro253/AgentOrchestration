@@ -1,22 +1,137 @@
 """API middleware components."""
 
-import time
+import hashlib
 import logging
-from typing import Callable
+import re
+import time
+from typing import Callable, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+AUDIT_ACTOR_HEADER = "X-Audit-Actor"
+AUDIT_STATUS_HEADER = "X-Audit-Status"
+AUDIT_STATE_FIELDS = (
+    "audit_actor",
+    "audit_authenticated",
+)
+AUTH_TOKEN_PATH = "/api/v2/auth/token"
+PROTECTED_API_PREFIX = "/api/v2"
+SAFE_ACTOR_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
-        return await call_next(request)
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
+        _clear_audit_state(request)
+        actor = None
+        outcome = "public"
+        status_code = 200
+
+        try:
+            if _requires_auth(request):
+                token = _extract_bearer_token(request)
+                if token is None:
+                    outcome = "rejected"
+                    status_code = 401
+                    return Response(
+                        status_code=status_code,
+                        content="Unauthorized",
+                        headers={AUDIT_STATUS_HEADER: outcome},
+                    )
+
+                try:
+                    actor = _resolve_audit_actor(request, token)
+                except ValueError:
+                    outcome = "rejected"
+                    status_code = 400
+                    return Response(
+                        status_code=status_code,
+                        content="Invalid audit actor",
+                        headers={AUDIT_STATUS_HEADER: outcome},
+                    )
+
+                request.state.audit_actor = actor
+                request.state.audit_authenticated = True
+                outcome = "authenticated"
+
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[AUDIT_STATUS_HEADER] = outcome
+            if actor is not None:
+                response.headers[AUDIT_ACTOR_HEADER] = actor
+            return response
+        except Exception:
+            status_code = 500
+            logger.exception(
+                "request failed after audit middleware decision",
+                extra=_audit_log_extra(request, actor, outcome, status_code),
+            )
+            raise
+        finally:
+            logger.info(
+                "audit middleware completed",
+                extra=_audit_log_extra(request, actor, outcome, status_code),
+            )
+            _clear_audit_state(request)
+
+
+def _requires_auth(request: Request) -> bool:
+    path = request.url.path
+    return path.startswith(PROTECTED_API_PREFIX) and path != AUTH_TOKEN_PATH
+
+
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    token = authorization[len("Bearer "):].strip()
+    return token or None
+
+
+def _resolve_audit_actor(request: Request, token: str) -> str:
+    actor = (
+        request.headers.get("X-Audit-Actor")
+        or request.headers.get("X-Actor-Id")
+        or request.headers.get("X-User-Id")
+    )
+    if actor:
+        actor = actor.strip()
+        if not SAFE_ACTOR_RE.fullmatch(actor):
+            raise ValueError("invalid audit actor")
+        return actor
+
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"token:{digest[:12]}"
+
+
+def _audit_log_extra(
+    request: Request,
+    actor: Optional[str],
+    outcome: str,
+    status_code: int,
+) -> dict:
+    return {
+        "audit_actor": actor or "anonymous",
+        "audit_outcome": outcome,
+        "audit_status_code": status_code,
+        "method": request.method,
+        "path": request.url.path,
+    }
+
+
+def _clear_audit_state(request: Request) -> None:
+    for field in AUDIT_STATE_FIELDS:
+        try:
+            delattr(request.state, field)
+        except (AttributeError, KeyError):
+            pass
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -26,14 +141,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.window = window
         self._requests = {}
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
 
         if client_ip not in self._requests:
             self._requests[client_ip] = []
 
-        self._requests[client_ip] = [t for t in self._requests[client_ip] if now - t < self.window]
+        self._requests[client_ip] = [
+            t for t in self._requests[client_ip]
+            if now - t < self.window
+        ]
 
         if len(self._requests[client_ip]) >= self.max_requests:
             return Response(status_code=429, content="Too many requests")
@@ -43,11 +165,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
         start = time.time()
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        logger.info(
+            "%s %s %s %.3fs",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+        )
         return response
 
 # 2019-03-01T18:35:19 update
