@@ -1,4 +1,4 @@
-import pytest
+import time
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -35,6 +35,59 @@ class TestTaskScheduler:
         import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+    def test_extend_visibility_timeout_for_long_running_task(self):
+        self.scheduler.enqueue({"type": "long-running"})
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue(timeout=1.0))
+        task_id = task["id"]
+
+        assert self.scheduler.extend_visibility_timeout(
+            task_id,
+            extension=30.0,
+            expected_revision=1,
+        )
+        assert not self.scheduler.extend_visibility_timeout(
+            task_id,
+            extension=30.0,
+            expected_revision=1,
+        )
+
+        decisions = [
+            entry["decision"]
+            for entry in self.scheduler.visibility_audit()
+        ]
+        assert decisions == ["extended", "stale"]
+        assert self.scheduler.complete(task_id)
+
+    def test_expired_visibility_is_redelivered_without_payload_audit(self):
+        self.scheduler.enqueue(
+            {"type": "long-running", "payload": {"secret": "x"}}
+        )
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue(timeout=0.001))
+        task_id = task["id"]
+        time.sleep(0.01)
+
+        redelivered = asyncio.run(self.scheduler.dequeue(timeout=1.0))
+
+        assert redelivered is not None
+        assert redelivered["id"] == task_id
+        assert self.scheduler.visibility_audit()[0]["decision"] == "expired"
+        assert "payload" not in self.scheduler.visibility_audit()[0]
+
+    def test_scheduled_task_preserves_payload_when_due(self):
+        self.scheduler.schedule(
+            {"type": "scheduled", "payload": {"value": 1}},
+            delay=0,
+            priority=4,
+        )
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+
+        assert task["type"] == "scheduled"
+        assert task["payload"] == {"value": 1}
+        assert task["priority"] == 4
 
 # 2019-01-09T19:07:03 update
 

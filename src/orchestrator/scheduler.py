@@ -1,9 +1,8 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -33,51 +32,156 @@ class PriorityQueue:
 class TaskScheduler:
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
+        self._scheduled: Dict[str, Dict] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._visibility: Dict[str, Dict] = {}
+        self._visibility_audit: List[Dict] = []
         self._max_retries = 3
+        self._visibility_timeout = 30.0
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task["retries"] = task.get("retries", 0)
+        task["priority"] = priority
 
+        self._push(task, queue, priority)
+        return task_id
+
+    def _push(self, task: Dict, queue: str, priority: int) -> None:
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
-        return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["retries"] = task.get("retries", 0)
+        task["priority"] = priority
+        self._scheduled[task_id] = {
+            "deadline": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid
+            for tid, record in self._scheduled.items()
+            if record["deadline"] <= now
+        ]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            record = self._scheduled.pop(tid)
+            self._push(
+                record["task"],
+                record["queue"],
+                record["priority"],
+            )
+
+        self._redeliver_expired_visibility(queue, now)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                self._visibility[task["id"]] = {
+                    "deadline": now + timeout,
+                    "revision": 1,
+                    "queue": queue,
+                    "priority": task.get("priority", 0),
+                }
                 return task
         return None
 
+    def _redeliver_expired_visibility(self, queue: str, now: float) -> None:
+        expired = [
+            task_id
+            for task_id, record in self._visibility.items()
+            if record["queue"] == queue and record["deadline"] <= now
+        ]
+        for task_id in expired:
+            record = self._visibility.pop(task_id)
+            task = self._in_flight.pop(task_id, None)
+            if not task:
+                self._audit_visibility(task_id, "missing")
+                continue
+            self._audit_visibility(task_id, "expired")
+            self._push(task, record["queue"], record["priority"])
+
+    def extend_visibility_timeout(
+        self,
+        task_id: str,
+        extension: float,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
+        if extension <= 0:
+            self._audit_visibility(task_id, "invalid_extension")
+            return False
+
+        record = self._visibility.get(task_id)
+        if not record or task_id not in self._in_flight:
+            self._audit_visibility(task_id, "missing")
+            return False
+
+        now = time.time()
+        if record["deadline"] <= now:
+            self._audit_visibility(task_id, "expired")
+            return False
+
+        if (
+            expected_revision is not None
+            and expected_revision != record["revision"]
+        ):
+            self._audit_visibility(task_id, "stale")
+            return False
+
+        record["deadline"] = max(record["deadline"], now) + extension
+        record["revision"] += 1
+        self._audit_visibility(task_id, "extended")
+        return True
+
+    def visibility_audit(self) -> List[Dict]:
+        return list(self._visibility_audit)
+
+    def _audit_visibility(self, task_id: str, decision: str) -> None:
+        self._visibility_audit.append(
+            {
+                "task_id": task_id,
+                "decision": decision,
+                "timestamp": time.time(),
+            }
+        )
+
     def complete(self, task_id: str) -> bool:
+        self._visibility.pop(task_id, None)
         return self._in_flight.pop(task_id, None) is not None
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
+        self._visibility.pop(task_id, None)
         task = self._in_flight.pop(task_id, None)
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
+                self._push(task, queue, task.get("priority", 0))
                 return True
         return False
 
