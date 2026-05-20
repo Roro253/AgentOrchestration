@@ -125,6 +125,19 @@ class TestAgentRegistry:
         assert records[-1]["agent_type"] == "worker.processor"
         assert "private-token" not in str(records[-1])
 
+    def test_resolve_by_id_does_not_fall_back_to_same_type(self):
+        disabled_id = self.registry.register(
+            "agent-1",
+            "worker.processor",
+            config={"enabled": False},
+        )
+        self.registry.register("agent-2", "worker.processor")
+
+        assert self.registry.resolve(agent_id=disabled_id) is None
+        records = self.registry.audit_records()
+
+        assert records[-1]["agent_id"] == disabled_id
+
     def test_update_status(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
         assert self.registry.update_status(agent_id, AgentStatus.RUNNING)

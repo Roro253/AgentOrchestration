@@ -97,6 +97,7 @@ class AgentRegistry:
 
     def resolve(
         self,
+        agent_id: Optional[str] = None,
         agent_type: Optional[str] = None,
         group: Optional[str] = None,
         include_disabled: bool = False,
@@ -107,11 +108,18 @@ class AgentRegistry:
             agents = [agent for agent in agents if agent["id"] in agent_ids]
 
         for agent in agents:
+            if agent_id and agent["id"] != agent_id:
+                continue
             if agent_type and agent["type"] != agent_type:
                 continue
             if include_disabled or self._is_discoverable(agent):
                 return agent.copy()
-            self._record_rejected_resolution(agent, agent_type, group)
+            self._record_rejected_resolution(
+                agent,
+                agent_id,
+                agent_type,
+                group,
+            )
         return None
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
@@ -186,11 +194,13 @@ class AgentRegistry:
     def _record_rejected_resolution(
         self,
         agent: Dict[str, Any],
+        agent_id: Optional[str],
         agent_type: Optional[str],
         group: Optional[str],
     ) -> None:
         self._audit_records.append({
             "event": "registry.disabled_resolution_rejected",
+            "agent_id": agent_id,
             "agent_type": agent_type or agent["type"],
             "group": group or agent["type"].split(".")[0],
             "status": agent["status"],
