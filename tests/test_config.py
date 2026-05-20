@@ -1,4 +1,3 @@
-import pytest
 from src.common.config import Config
 
 
@@ -31,6 +30,33 @@ class TestConfig:
         data = config.to_dict()
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
+
+    def test_runtime_ao_env_vars_are_not_loaded_as_config(self, monkeypatch):
+        monkeypatch.setenv("AO_AGENT_ID", "agent-runtime-123")
+        monkeypatch.setenv("AO_API_KEY", "secret-runtime-key")
+        monkeypatch.setenv("AO_API_URL", "https://runtime.example.test")
+
+        config = Config()
+
+        assert config.get("agent.id") is None
+        assert config.get("api.key") is None
+        assert config.get("api.url") is None
+        assert "agent" not in config.to_dict()
+        assert "api" not in config.to_dict()
+
+    def test_scoped_config_env_overrides_are_loaded(
+        self, monkeypatch, tmp_path
+    ):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"app": {"name": "file", "port": 8080}}')
+        monkeypatch.setenv("AO_CONFIG_APP_NAME", "env")
+        monkeypatch.setenv("AO_CONFIG_DATABASE_HOST", "db.internal")
+
+        config = Config(str(config_file))
+
+        assert config.get("app.name") == "env"
+        assert config.get("app.port") == 8080
+        assert config.get("database.host") == "db.internal"
 
 # 2019-02-01T18:58:35 update
 
