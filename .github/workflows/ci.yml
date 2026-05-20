@@ -14,15 +14,20 @@ jobs:
         python-version: ["3.9", "3.10", "3.11"]
 
     steps:
-      - uses: actions/checkout@v4
+      # External actions are pinned to reviewed commit SHAs. Update them only
+      # through Dependabot PRs from .github/dependabot.yml, review the upstream
+      # changelog/diff, and keep scripts/validate_action_pins.py passing.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39
       - name: Install dependencies
         run: uv sync
+      - name: Validate pinned action refs
+        run: uv run python scripts/validate_action_pins.py
       - name: Run tests
         run: uv run pytest --cov=src tests/
       - name: Lint
