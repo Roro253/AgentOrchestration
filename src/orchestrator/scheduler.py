@@ -3,7 +3,7 @@
 import heapq
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from src.common.metrics import metrics
@@ -35,12 +35,22 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(
+        self,
+        dispatch_validator: Optional[
+            Callable[[Dict[str, Any]], Tuple[bool, str]]
+        ] = None,
+        decision_recorder: Optional[
+            Callable[[Dict[str, Any], str, bool], None]
+        ] = None,
+    ):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._claim_audit: List[Dict[str, Any]] = []
         self._max_retries = 3
+        self._dispatch_validator = dispatch_validator
+        self._decision_recorder = decision_recorder
 
     def enqueue(
         self,
@@ -71,6 +81,28 @@ class TaskScheduler:
         return task_id
 
     async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
+        self._promote_scheduled(queue)
+
+        if queue in self._queues and len(self._queues[queue]) > 0:
+            deferred = []
+            while len(self._queues[queue]) > 0:
+                task = self._queues[queue].pop()
+                allowed, reason = self._dispatch_decision(task)
+                if allowed:
+                    self._in_flight[task["id"]] = task
+                    return task
+                self._record_dispatch_decision(task, reason)
+                deferred.append(task)
+
+            for task in deferred:
+                self._queues[queue].push(task, task.get("priority", 0))
+        return None
+
+    async def dequeue_unvalidated(
         self,
         queue: str = "default",
         timeout: float = 1.0,
@@ -167,6 +199,35 @@ class TaskScheduler:
             return "missing_capability"
 
         return "claim"
+
+    def _dispatch_decision(self, task: Dict[str, Any]) -> Tuple[bool, str]:
+        if not self._dispatch_validator:
+            return True, "accepted"
+        return self._dispatch_validator(task)
+
+    def _record_dispatch_decision(
+        self,
+        task: Dict[str, Any],
+        reason: str,
+    ) -> None:
+        audit = {
+            "event": "task_dispatch_deferred",
+            "task_id": task.get("id"),
+            "target_agent": task.get("target_agent"),
+            "reason": reason,
+        }
+        self._claim_audit.append(audit)
+        metrics.increment(f"scheduler.dispatch.deferred.{reason}")
+        if self._decision_recorder:
+            self._decision_recorder(task, reason, False)
+        logger.info(
+            "Deferred task dispatch",
+            extra={
+                "task_id": task.get("id"),
+                "target_agent": task.get("target_agent"),
+                "reason": reason,
+            },
+        )
 
     def _record_claim_decision(
         self,
