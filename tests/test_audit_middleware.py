@@ -9,14 +9,20 @@ from starlette.requests import Request as StarletteRequest
 from src.api.middleware import (
     AUDIT_ACTOR_HEADER,
     AUDIT_STATUS_HEADER,
+    AuditMiddleware,
     AuthMiddleware,
     get_current_audit_actor,
 )
 
 
+def add_auth_audit_middleware(app: FastAPI) -> None:
+    app.add_middleware(AuditMiddleware)
+    app.add_middleware(AuthMiddleware)
+
+
 def test_authenticated_request_attaches_sanitized_audit_actor(caplog):
     app = FastAPI()
-    app.add_middleware(AuthMiddleware)
+    add_auth_audit_middleware(app)
 
     @app.get("/api/v2/agents")
     async def read_agents(request: Request):
@@ -49,7 +55,7 @@ def test_authenticated_request_attaches_sanitized_audit_actor(caplog):
 
 def test_token_actor_fallback_is_stable_and_non_secret():
     app = FastAPI()
-    app.add_middleware(AuthMiddleware)
+    add_auth_audit_middleware(app)
 
     @app.get("/api/v2/audit-context")
     async def read_context(request: Request):
@@ -77,7 +83,7 @@ def test_token_actor_fallback_is_stable_and_non_secret():
 
 def test_token_route_remains_public_without_audit_actor():
     app = FastAPI()
-    app.add_middleware(AuthMiddleware)
+    add_auth_audit_middleware(app)
 
     @app.post("/api/v2/auth/token")
     async def issue_token(request: Request):
@@ -104,7 +110,7 @@ def test_token_route_remains_public_without_audit_actor():
 
 def test_rejected_request_does_not_attach_audit_actor():
     app = FastAPI()
-    app.add_middleware(AuthMiddleware)
+    add_auth_audit_middleware(app)
     called = {"handler": False}
 
     @app.get("/api/v2/agents")
@@ -123,7 +129,7 @@ def test_rejected_request_does_not_attach_audit_actor():
 
 def test_invalid_actor_fails_closed_before_handler():
     app = FastAPI()
-    app.add_middleware(AuthMiddleware)
+    add_auth_audit_middleware(app)
     called = {"handler": False}
 
     @app.post("/api/v2/agents")
@@ -163,7 +169,8 @@ def test_exception_path_clears_request_local_audit_state(caplog):
             "client": ("127.0.0.1", 5000),
         }
         request = StarletteRequest(scope)
-        middleware = AuthMiddleware(app=lambda scope, receive, send: None)
+        request.state.authenticated_actor = "user-123"
+        middleware = AuditMiddleware(app=lambda scope, receive, send: None)
 
         async def call_next(request):
             assert request.state.audit_actor == "user-123"
@@ -184,3 +191,26 @@ def test_exception_path_clears_request_local_audit_state(caplog):
         getattr(record, "audit_actor", None) == "user-123"
         for record in caplog.records
     )
+
+
+def test_audit_middleware_fails_closed_without_auth_state():
+    app = FastAPI()
+    app.add_middleware(AuditMiddleware)
+    called = {"handler": False}
+
+    @app.get("/api/v2/agents")
+    async def read_agents():
+        called["handler"] = True
+        return {"status": "should-not-run"}
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/v2/agents",
+        headers={"Authorization": "Bearer raw-secret-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.headers[AUDIT_STATUS_HEADER] == "rejected"
+    assert AUDIT_ACTOR_HEADER not in response.headers
+    assert not called["handler"]
+    assert get_current_audit_actor() is None

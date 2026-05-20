@@ -19,6 +19,10 @@ AUDIT_STATE_FIELDS = (
     "audit_actor",
     "audit_authenticated",
 )
+AUTH_STATE_FIELDS = (
+    "authenticated_actor",
+    "authenticated",
+)
 AUTH_TOKEN_PATH = "/api/v2/auth/token"
 PROTECTED_API_PREFIX = "/api/v2"
 SAFE_ACTOR_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
@@ -34,6 +38,41 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable,
     ) -> Response:
+        _clear_auth_state(request)
+
+        try:
+            if _requires_auth(request):
+                token = _extract_bearer_token(request)
+                if token is None:
+                    return Response(
+                        status_code=401,
+                        content="Unauthorized",
+                        headers={AUDIT_STATUS_HEADER: "rejected"},
+                    )
+
+                try:
+                    actor = _resolve_audit_actor(request, token)
+                except ValueError:
+                    return Response(
+                        status_code=400,
+                        content="Invalid audit actor",
+                        headers={AUDIT_STATUS_HEADER: "rejected"},
+                    )
+
+                request.state.authenticated_actor = actor
+                request.state.authenticated = True
+
+            return await call_next(request)
+        finally:
+            _clear_auth_state(request)
+
+
+class AuditMiddleware(BaseHTTPMiddleware):
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
         _clear_audit_state(request)
         actor = None
         outcome = "public"
@@ -41,38 +80,31 @@ class AuthMiddleware(BaseHTTPMiddleware):
         audit_actor_token = None
 
         try:
-            if _requires_auth(request):
-                token = _extract_bearer_token(request)
-                if token is None:
-                    outcome = "rejected"
-                    status_code = 401
-                    return Response(
-                        status_code=status_code,
-                        content="Unauthorized",
-                        headers={AUDIT_STATUS_HEADER: outcome},
-                    )
+            if not _requires_auth(request):
+                response = await call_next(request)
+                status_code = response.status_code
+                response.headers[AUDIT_STATUS_HEADER] = outcome
+                return response
 
-                try:
-                    actor = _resolve_audit_actor(request, token)
-                except ValueError:
-                    outcome = "rejected"
-                    status_code = 400
-                    return Response(
-                        status_code=status_code,
-                        content="Invalid audit actor",
-                        headers={AUDIT_STATUS_HEADER: outcome},
-                    )
+            actor = getattr(request.state, "authenticated_actor", None)
+            if not actor:
+                outcome = "rejected"
+                status_code = 401
+                return Response(
+                    status_code=status_code,
+                    content="Unauthorized",
+                    headers={AUDIT_STATUS_HEADER: outcome},
+                )
 
-                request.state.audit_actor = actor
-                request.state.audit_authenticated = True
-                audit_actor_token = _current_audit_actor.set(actor)
-                outcome = "authenticated"
+            request.state.audit_actor = actor
+            request.state.audit_authenticated = True
+            audit_actor_token = _current_audit_actor.set(actor)
+            outcome = "authenticated"
 
             response = await call_next(request)
             status_code = response.status_code
             response.headers[AUDIT_STATUS_HEADER] = outcome
-            if actor is not None:
-                response.headers[AUDIT_ACTOR_HEADER] = actor
+            response.headers[AUDIT_ACTOR_HEADER] = actor
             return response
         except Exception:
             status_code = 500
@@ -141,6 +173,14 @@ def _audit_log_extra(
 
 def _clear_audit_state(request: Request) -> None:
     for field in AUDIT_STATE_FIELDS:
+        try:
+            delattr(request.state, field)
+        except (AttributeError, KeyError):
+            pass
+
+
+def _clear_auth_state(request: Request) -> None:
+    for field in AUTH_STATE_FIELDS:
         try:
             delattr(request.state, field)
         except (AttributeError, KeyError):
