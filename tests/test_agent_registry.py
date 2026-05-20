@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -39,6 +38,32 @@ class TestAgentRegistry:
         assert self.registry.update_status(agent_id, AgentStatus.RUNNING)
         agent = self.registry.get(agent_id)
         assert agent["status"] == "running"
+
+    def test_refresh_worker_capabilities_on_reconnect(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            capabilities=["summarize", "embed"],
+        )
+
+        snapshot = self.registry.refresh_capabilities(
+            agent_id,
+            ["search", "summarize"],
+        )
+
+        assert snapshot == {
+            "id": agent_id,
+            "status": "pending",
+            "capabilities": ["search", "summarize"],
+            "capability_epoch": 2,
+        }
+        agent = self.registry.get(agent_id)
+        assert agent["capabilities"] == ["search", "summarize"]
+        assert agent["audit"][-1] == {
+            "event": "worker_capabilities_refreshed",
+            "capability_epoch": 2,
+            "capability_count": 2,
+        }
 
     def test_delete_agent(self):
         agent_id = self.registry.register("test-agent", "worker.processor")

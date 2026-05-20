@@ -1,10 +1,14 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
+import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+from src.common.metrics import metrics
+
+logger = logging.getLogger(__name__)
 
 
 class PriorityQueue:
@@ -35,9 +39,15 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._claim_audit: List[Dict[str, Any]] = []
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -48,25 +58,64 @@ class TaskScheduler:
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
-        now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
-        for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
+        self._promote_scheduled(queue)
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
                 return task
+        return None
+
+    async def claim_for_worker(
+        self,
+        worker_snapshot: Dict[str, Any],
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
+        self._promote_scheduled(queue)
+        if queue not in self._queues or len(self._queues[queue]) == 0:
+            return None
+
+        skipped = []
+        claimed = None
+        while len(self._queues[queue]) > 0:
+            task = self._queues[queue].pop()
+            decision = self._worker_claim_decision(task, worker_snapshot)
+            if decision == "claim":
+                claimed = task
+                break
+            self._record_claim_decision(task, worker_snapshot, decision)
+            skipped.append(task)
+
+        for task in skipped:
+            self._queues[queue].push(task, task.get("priority", 0))
+
+        if claimed:
+            claimed["claimed_by"] = worker_snapshot["id"]
+            claimed["worker_capability_epoch"] = (
+                worker_snapshot["capability_epoch"]
+            )
+            self._in_flight[claimed["id"]] = claimed
+            metrics.increment("scheduler.worker_claim.accepted")
+            return claimed
         return None
 
     def complete(self, task_id: str) -> bool:
@@ -80,6 +129,68 @@ class TaskScheduler:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def claim_audit(self) -> List[Dict[str, Any]]:
+        return list(self._claim_audit)
+
+    def _promote_scheduled(self, queue: str) -> None:
+        now = time.time()
+        expired = [
+            tid
+            for tid, scheduled_at in self._scheduled.items()
+            if scheduled_at <= now
+        ]
+        for task_id in expired:
+            task = self._scheduled.pop(task_id)
+            if task:
+                self.enqueue(task, queue)
+
+    def _worker_claim_decision(
+        self,
+        task: Dict[str, Any],
+        worker_snapshot: Dict[str, Any],
+    ) -> str:
+        worker_id = worker_snapshot["id"]
+        if task.get("target_agent") and task["target_agent"] != worker_id:
+            return "target_agent_mismatch"
+
+        required_epoch = task.get("worker_capability_epoch")
+        if (
+            required_epoch is not None
+            and required_epoch != worker_snapshot["capability_epoch"]
+        ):
+            return "stale_capability_epoch"
+
+        required_capability = task.get("required_capability")
+        capabilities = set(worker_snapshot.get("capabilities", []))
+        if required_capability and required_capability not in capabilities:
+            return "missing_capability"
+
+        return "claim"
+
+    def _record_claim_decision(
+        self,
+        task: Dict[str, Any],
+        worker_snapshot: Dict[str, Any],
+        decision: str,
+    ) -> None:
+        audit = {
+            "event": "worker_claim_deferred",
+            "task_id": task.get("id"),
+            "worker_id": worker_snapshot["id"],
+            "worker_capability_epoch": worker_snapshot["capability_epoch"],
+            "reason": decision,
+        }
+        self._claim_audit.append(audit)
+        metrics.increment(f"scheduler.worker_claim.deferred.{decision}")
+        logger.info(
+            "Deferred worker claim",
+            extra={
+                "task_id": task.get("id"),
+                "worker_id": worker_snapshot["id"],
+                "reason": decision,
+            },
+        )
 
 # 2019-04-25T08:37:12 update
 

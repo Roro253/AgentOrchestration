@@ -1,4 +1,6 @@
-import pytest
+import asyncio
+
+from src.agent.registry import AgentRegistry
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -12,7 +14,6 @@ class TestTaskScheduler:
 
     def test_dequeue_task(self):
         self.scheduler.enqueue({"type": "test", "payload": {"data": 1}})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert task is not None
         assert task["type"] == "test"
@@ -20,21 +21,74 @@ class TestTaskScheduler:
     def test_enqueue_multiple_priorities(self):
         self.scheduler.enqueue({"type": "low"}, priority=1)
         self.scheduler.enqueue({"type": "high"}, priority=10)
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert task["type"] == "high"
 
     def test_complete_task(self):
         self.scheduler.enqueue({"type": "test"})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.complete(task["id"])
 
     def test_fail_task_with_retry(self):
         self.scheduler.enqueue({"type": "test"})
-        import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+    def test_worker_claim_defers_stale_epoch_after_reconnect(self):
+        registry = AgentRegistry()
+        agent_id = registry.register(
+            "hot-reload-worker",
+            "worker.processor",
+            capabilities=["transcribe"],
+        )
+        stale_snapshot = registry.worker_snapshot(agent_id)
+        current_snapshot = registry.refresh_capabilities(
+            agent_id,
+            ["summarize"],
+        )
+        task_id = self.scheduler.enqueue({
+            "type": "summarize",
+            "target_agent": agent_id,
+            "required_capability": "transcribe",
+            "worker_capability_epoch": stale_snapshot["capability_epoch"],
+        })
+
+        task = asyncio.run(self.scheduler.claim_for_worker(current_snapshot))
+
+        assert task is None
+        assert task_id not in self.scheduler._in_flight
+        assert self.scheduler.claim_audit()[-1] == {
+            "event": "worker_claim_deferred",
+            "task_id": task_id,
+            "worker_id": agent_id,
+            "worker_capability_epoch": current_snapshot["capability_epoch"],
+            "reason": "stale_capability_epoch",
+        }
+        deferred = asyncio.run(self.scheduler.dequeue())
+        assert deferred["id"] == task_id
+
+    def test_worker_claim_uses_refreshed_capabilities(self):
+        registry = AgentRegistry()
+        agent_id = registry.register("hot-reload-worker", "worker.processor")
+        current_snapshot = registry.refresh_capabilities(
+            agent_id,
+            ["summarize"],
+        )
+        task_id = self.scheduler.enqueue({
+            "type": "summarize",
+            "target_agent": agent_id,
+            "required_capability": "summarize",
+        })
+
+        task = asyncio.run(self.scheduler.claim_for_worker(current_snapshot))
+
+        assert task["id"] == task_id
+        assert task["claimed_by"] == agent_id
+        assert (
+            task["worker_capability_epoch"]
+            == current_snapshot["capability_epoch"]
+        )
+        assert task_id in self.scheduler._in_flight
 
 # 2019-01-09T19:07:03 update
 
