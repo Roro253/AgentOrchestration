@@ -32,6 +32,74 @@ class TestConfig:
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
 
+    def test_initial_data_is_copied(self):
+        source = {"service": {"limits": [1, 2], "flags": {"enabled": True}}}
+        config = Config(initial_data=source)
+
+        source["service"]["limits"].append(3)
+        source["service"]["flags"]["enabled"] = False
+
+        assert config.get("service") == {
+            "limits": [1, 2],
+            "flags": {"enabled": True},
+        }
+
+    def test_data_alias_is_copied(self):
+        source = {"service": {"limits": [1, 2]}}
+        config = Config(data=source)
+
+        source["service"]["limits"].append(3)
+
+        assert config.get("service.limits") == [1, 2]
+
+    def test_rejects_ambiguous_initial_data_aliases(self):
+        with pytest.raises(ValueError, match="either initial_data or data"):
+            Config(initial_data={}, data={})
+
+    def test_load_dict_is_copied(self):
+        source = {"service": {"limits": [1, 2]}}
+        config = Config()
+
+        config.load_dict(source)
+        source["service"]["limits"].append(3)
+
+        assert config.get("service.limits") == [1, 2]
+
+    def test_load_dict_requires_a_dictionary(self):
+        config = Config()
+
+        with pytest.raises(TypeError, match="dictionary"):
+            config.load_dict([("service", "invalid")])
+
+    def test_set_copies_nested_values(self):
+        config = Config()
+        value = {"limits": [1, 2], "flags": {"enabled": True}}
+
+        config.set("service", value)
+        value["limits"].append(3)
+        value["flags"]["enabled"] = False
+
+        assert config.get("service") == {
+            "limits": [1, 2],
+            "flags": {"enabled": True},
+        }
+
+    def test_get_returns_a_copy(self):
+        config = Config(initial_data={"service": {"limits": [1, 2]}})
+
+        value = config.get("service")
+        value["limits"].append(3)
+
+        assert config.get("service.limits") == [1, 2]
+
+    def test_to_dict_returns_a_copy(self):
+        config = Config(initial_data={"service": {"limits": [1, 2]}})
+
+        data = config.to_dict()
+        data["service"]["limits"].append(3)
+
+        assert config.get("service.limits") == [1, 2]
+
 # 2019-02-01T18:58:35 update
 
 # 2019-07-31T13:45:15 update

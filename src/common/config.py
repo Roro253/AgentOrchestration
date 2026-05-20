@@ -2,19 +2,36 @@
 
 import os
 import json
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 
 class Config:
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        initial_data: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ):
         self._data: Dict[str, Any] = {}
+        if initial_data is not None and data is not None:
+            raise ValueError("Pass either initial_data or data, not both")
+        if data is not None:
+            initial_data = data
+        if initial_data is not None:
+            self.load_dict(initial_data)
         if config_path:
             self.load(config_path)
         self._load_env_overrides()
 
     def load(self, path: str) -> None:
         with open(path) as f:
-            self._data = json.load(f)
+            self.load_dict(json.load(f))
+
+    def load_dict(self, data: Dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise TypeError("Config data must be a dictionary")
+        self._data = deepcopy(data)
 
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
@@ -30,7 +47,7 @@ class Config:
             if part not in current:
                 current[part] = {}
             current = current[part]
-        current[parts[-1]] = value
+        current[parts[-1]] = deepcopy(value)
 
     def get(self, key: str, default: Any = None) -> Any:
         parts = key.split(".")
@@ -42,13 +59,13 @@ class Config:
                     return default
             else:
                 return default
-        return current
+        return deepcopy(current)
 
     def set(self, key: str, value: Any) -> None:
         self._set_nested(key, value)
 
     def to_dict(self) -> Dict:
-        return self._data
+        return deepcopy(self._data)
 
 # 2019-03-14T15:29:32 update
 
