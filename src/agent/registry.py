@@ -6,6 +6,8 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from src.common.metrics import metrics
+
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ class AgentRegistry:
         if group not in self._index:
             self._index[group] = []
         self._index[group].append(agent_id)
-        self._invalidate_cache(agent_type)
+        self._invalidate_cache(agent_type, agent_id)
         return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
@@ -83,7 +85,7 @@ class AgentRegistry:
             return False
         self._agents[agent_id]["status"] = status.value
         self._agents[agent_id]["updated_at"] = time.time()
-        self._invalidate_cache(self._agents[agent_id]["type"])
+        self._invalidate_cache(self._agents[agent_id]["type"], agent_id)
         return True
 
     def update_health(
@@ -101,7 +103,7 @@ class AgentRegistry:
         if accepting_tasks is not None:
             agent["accepting_tasks"] = accepting_tasks
         agent["updated_at"] = time.time()
-        self._invalidate_cache(agent["type"])
+        self._invalidate_cache(agent["type"], agent_id)
         return True
 
     def resolve(
@@ -158,7 +160,7 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
-        self._invalidate_cache(agent["type"])
+        self._invalidate_cache(agent["type"], agent_id)
         return True
 
     def count(self) -> int:
@@ -205,9 +207,11 @@ class AgentRegistry:
             return "missing_capability"
         return None
 
-    def _invalidate_cache(self, agent_type: str) -> None:
+    def _invalidate_cache(self, agent_type: str, agent_id: str) -> None:
         stale_keys = [
-            key for key in self._resolution_cache if key[0] == agent_type
+            key
+            for key, cached_id in self._resolution_cache.items()
+            if key[0] == agent_type or cached_id == agent_id
         ]
         for key in stale_keys:
             self._resolution_cache.pop(key, None)
@@ -228,6 +232,9 @@ class AgentRegistry:
             "timestamp": time.time(),
         }
         self._routing_audit.append(record)
+        metrics.increment(f"agent_registry.routing.{decision}")
+        if reason:
+            metrics.increment(f"agent_registry.routing.rejected.{reason}")
         logger.info(
             "routing %s for agent_type=%s agent_id=%s reason=%s",
             decision,

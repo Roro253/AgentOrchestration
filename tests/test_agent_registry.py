@@ -1,5 +1,6 @@
 import pytest
 from src.agent.registry import AgentRegistry, AgentStatus, HandlerRoutingError
+from src.common.metrics import metrics
 
 
 class TestAgentRegistry:
@@ -49,6 +50,10 @@ class TestAgentRegistry:
         assert not self.registry.delete("nonexistent-id")
 
     def test_resolve_rejects_unhealthy_handler_during_rolling_deploy(self):
+        before = metrics.snapshot()["counters"].get(
+            "agent_registry.routing.rejected.unhealthy",
+            0,
+        )
         old_agent = self.registry.register(
             "worker-v1",
             "worker.processor",
@@ -80,6 +85,10 @@ class TestAgentRegistry:
             for record in audit
         )
         assert all("capabilities" not in record for record in audit)
+        after = metrics.snapshot()["counters"][
+            "agent_registry.routing.rejected.unhealthy"
+        ]
+        assert after == before + 1
 
     def test_resolve_denies_capability_incompatible_handler(self):
         agent_id = self.registry.register(
