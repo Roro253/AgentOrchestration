@@ -17,6 +17,14 @@ class AgentStatus(Enum):
     TERMINATED = "terminated"
 
 
+UNAVAILABLE_STATUSES = {
+    AgentStatus.PAUSED.value,
+    AgentStatus.STOPPED.value,
+    AgentStatus.FAILED.value,
+    AgentStatus.TERMINATED.value,
+}
+
+
 class AgentRegistry:
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
@@ -76,7 +84,7 @@ class AgentRegistry:
             agents = [a for a in agents if a["id"] in agent_ids]
         agents = list(agents)
         if not include_disabled:
-            visible_agents = [a for a in agents if a.get("enabled", True)]
+            visible_agents = [a for a in agents if self._is_discoverable(a)]
             self._record_filtered_listing(
                 len(agents) - len(visible_agents),
                 status,
@@ -86,6 +94,25 @@ class AgentRegistry:
 
         self._list_cache[cache_key] = [agent.copy() for agent in agents]
         return [agent.copy() for agent in agents]
+
+    def resolve(
+        self,
+        agent_type: Optional[str] = None,
+        group: Optional[str] = None,
+        include_disabled: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        agents = list(self._agents.values())
+        if group:
+            agent_ids = self._index.get(group, [])
+            agents = [agent for agent in agents if agent["id"] in agent_ids]
+
+        for agent in agents:
+            if agent_type and agent["type"] != agent_type:
+                continue
+            if include_disabled or self._is_discoverable(agent):
+                return agent.copy()
+            self._record_rejected_resolution(agent, agent_type, group)
+        return None
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
         if agent_id not in self._agents:
@@ -132,6 +159,13 @@ class AgentRegistry:
             return not bool(config["disabled"])
         return True
 
+    @staticmethod
+    def _is_discoverable(agent: Dict[str, Any]) -> bool:
+        return (
+            agent.get("enabled", True)
+            and agent["status"] not in UNAVAILABLE_STATUSES
+        )
+
     def _record_filtered_listing(
         self,
         filtered_count: int,
@@ -148,6 +182,21 @@ class AgentRegistry:
             "timestamp": time.time(),
         })
         metrics.increment("registry.disabled_entries_filtered", filtered_count)
+
+    def _record_rejected_resolution(
+        self,
+        agent: Dict[str, Any],
+        agent_type: Optional[str],
+        group: Optional[str],
+    ) -> None:
+        self._audit_records.append({
+            "event": "registry.disabled_resolution_rejected",
+            "agent_type": agent_type or agent["type"],
+            "group": group or agent["type"].split(".")[0],
+            "status": agent["status"],
+            "timestamp": time.time(),
+        })
+        metrics.increment("registry.disabled_resolution_rejected")
 
 # 2019-01-29T11:24:49 update
 

@@ -59,6 +59,21 @@ class TestAgentRegistry:
 
         assert len(agents) == 2
 
+    def test_list_filters_unavailable_statuses_by_default(self):
+        self.registry.register("agent-1", "worker.processor")
+        paused_id = self.registry.register("agent-2", "worker.analyzer")
+        self.registry.update_status(paused_id, AgentStatus.PAUSED)
+
+        agents = self.registry.list(group="worker")
+
+        assert len(agents) == 1
+        assert agents[0]["name"] == "agent-1"
+        admin_agents = self.registry.list(
+            group="worker",
+            include_disabled=True,
+        )
+        assert len(admin_agents) == 2
+
     def test_disabling_agent_invalidates_listing_cache(self):
         agent_id = self.registry.register("agent-1", "worker.processor")
         assert [
@@ -82,6 +97,32 @@ class TestAgentRegistry:
         assert records[-1]["event"] == "registry.disabled_entries_filtered"
         assert records[-1]["filtered_count"] == 1
         assert records[-1]["group"] == "worker"
+        assert "private-token" not in str(records[-1])
+
+    def test_resolve_skips_disabled_agents(self):
+        self.registry.register(
+            "agent-1",
+            "worker.processor",
+            config={"enabled": False},
+        )
+        enabled_id = self.registry.register("agent-2", "worker.processor")
+
+        resolved = self.registry.resolve(agent_type="worker.processor")
+
+        assert resolved["id"] == enabled_id
+
+    def test_resolve_rejects_disabled_without_leaking_config(self):
+        self.registry.register(
+            "agent-1",
+            "worker.processor",
+            config={"enabled": False, "secret": "private-token"},
+        )
+
+        assert self.registry.resolve(agent_type="worker.processor") is None
+        records = self.registry.audit_records()
+
+        assert records[-1]["event"] == "registry.disabled_resolution_rejected"
+        assert records[-1]["agent_type"] == "worker.processor"
         assert "private-token" not in str(records[-1])
 
     def test_update_status(self):

@@ -33,6 +33,22 @@ async def register_agent(
     return {"agent_id": agent_id, "status": "registered"}
 
 
+@router.get("/agents/resolve")
+async def resolve_agent(
+    agent_type: Optional[str] = None,
+    group: Optional[str] = None,
+    include_disabled: bool = False,
+):
+    agent = registry.resolve(
+        agent_type=agent_type,
+        group=group,
+        include_disabled=include_disabled,
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
 @router.get("/agents/{agent_id}")
 async def get_agent(agent_id: str):
     agent = registry.get(agent_id)
