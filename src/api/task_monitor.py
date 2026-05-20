@@ -92,12 +92,14 @@ class TaskMonitorAuthService:
         *,
         authorization: Optional[str],
         cookie_header: Optional[str],
+        session_token: Optional[str],
         workspace_id: Optional[str],
         required_scope: str = MONITOR_SCOPE,
     ) -> MonitorPrincipal:
         credential_type, token = self._extract_credential(
             authorization=authorization,
             cookie_header=cookie_header,
+            session_token=session_token,
         )
         if token is None or credential_type is None:
             raise MonitorAnonymous
@@ -146,12 +148,19 @@ class TaskMonitorAuthService:
         *,
         authorization: Optional[str],
         cookie_header: Optional[str],
+        session_token: Optional[str],
     ) -> tuple[Optional[str], Optional[str]]:
         if authorization:
             parts = authorization.split(" ", 1)
             if len(parts) != 2 or parts[0] != "Bearer" or not parts[1].strip():
                 raise MonitorInvalidCredential
             return "api_key", parts[1].strip()
+
+        if session_token:
+            token = session_token.strip()
+            if not token:
+                raise MonitorInvalidCredential
+            return "session", token
 
         if cookie_header:
             cookie = SimpleCookie()

@@ -20,7 +20,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         ):
             token = request.headers.get("Authorization", "")
             session_cookie = request.cookies.get("ao_session")
-            if not token.startswith("Bearer ") and not session_cookie:
+            session_header = request.headers.get("X-Session-Token")
+            if (
+                not token.startswith("Bearer ")
+                and not session_cookie
+                and not session_header
+            ):
                 return Response(status_code=401, content="Unauthorized")
         return await call_next(request)
 

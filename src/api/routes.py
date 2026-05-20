@@ -75,6 +75,10 @@ async def monitor_task(
     task_id: str,
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
     workspace_id: Optional[str] = Header(default=None, alias="X-Workspace-ID"),
+    x_session_token: Optional[str] = Header(
+        default=None,
+        alias="X-Session-Token",
+    ),
     ao_session: Optional[str] = Cookie(default=None),
     auth_service: TaskMonitorAuthService = Depends(
         get_task_monitor_auth_service
@@ -86,6 +90,7 @@ async def monitor_task(
         principal = auth_service.validate(
             authorization=authorization,
             cookie_header=cookie_header,
+            session_token=x_session_token,
             workspace_id=workspace_id,
         )
     except MonitorAuthError as exc:

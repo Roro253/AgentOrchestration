@@ -157,6 +157,43 @@ def test_monitor_denies_invalid_api_key_state_before_task_read(
     assert store.read_count == 0
 
 
+@pytest.mark.parametrize(
+    ("headers", "response_body"),
+    [
+        (
+            {
+                "Authorization": "Token api-ok",
+                "X-Workspace-ID": "workspace-a",
+            },
+            "Unauthorized",
+        ),
+        (
+            _api_headers("api-missing"),
+            "Task monitor credential is invalid",
+        ),
+        (
+            {"Authorization": "Bearer api-ok"},
+            "Task monitor workspace access denied",
+        ),
+    ],
+)
+def test_monitor_denies_malformed_unknown_or_missing_workspace_before_read(
+    monitor_client,
+    headers,
+    response_body,
+):
+    client, _, store = monitor_client
+
+    response = client.get("/api/v2/tasks/task-1/monitor", headers=headers)
+
+    assert response.status_code in {401, 403}
+    if response.text == "Unauthorized":
+        assert response.text == response_body
+    else:
+        assert response.json()["detail"] == response_body
+    assert store.read_count == 0
+
+
 def test_monitor_denies_anonymous_poll_before_task_read(monitor_client):
     client, _, store = monitor_client
 
@@ -190,6 +227,23 @@ def test_monitor_allows_authorized_browser_session(monitor_client):
     response = client.get(
         "/api/v2/tasks/task-1/monitor",
         headers={"X-Workspace-ID": "workspace-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["principal"] == "browser-user"
+    assert response.json()["credential_type"] == "session"
+    assert store.read_count == 1
+
+
+def test_monitor_allows_authorized_browser_session_header(monitor_client):
+    client, _, store = monitor_client
+
+    response = client.get(
+        "/api/v2/tasks/task-1/monitor",
+        headers={
+            "X-Workspace-ID": "workspace-a",
+            "X-Session-Token": "session-ok",
+        },
     )
 
     assert response.status_code == 200
