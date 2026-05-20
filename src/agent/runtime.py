@@ -23,8 +23,13 @@ class AgentRuntime:
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
 
-    def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
-        if agent_id in self._processes and self._processes[agent_id].poll() is None:
+    def start(
+        self, agent_id: str, command: list, env: Optional[Dict] = None
+    ) -> bool:
+        if (
+            agent_id in self._processes
+            and self._processes[agent_id].poll() is None
+        ):
             logger.warning(f"Agent {agent_id} is already running")
             return False
 
@@ -70,7 +75,14 @@ class AgentRuntime:
     def get_state(self, agent_id: str) -> RuntimeState:
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
-            self._states[agent_id] = RuntimeState.CRASHED
+            current_state = self._states.get(agent_id, RuntimeState.STOPPED)
+            if current_state in {RuntimeState.STOPPED, RuntimeState.STOPPING}:
+                self._states[agent_id] = RuntimeState.STOPPED
+                return RuntimeState.STOPPED
+            if proc.returncode == 0:
+                self._states[agent_id] = RuntimeState.STOPPED
+            else:
+                self._states[agent_id] = RuntimeState.CRASHED
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
