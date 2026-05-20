@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -33,6 +32,57 @@ class TestAgentRegistry:
         self.registry.register("agent-2", "monitor.watcher")
         workers = self.registry.list(group="worker")
         assert len(workers) == 1
+
+    def test_list_filters_disabled_agents_by_default(self):
+        enabled_id = self.registry.register("agent-1", "worker.processor")
+        disabled_id = self.registry.register(
+            "agent-2",
+            "worker.analyzer",
+            config={"enabled": False, "token": "should-not-be-audited"},
+        )
+
+        agents = self.registry.list(group="worker")
+
+        assert [agent["id"] for agent in agents] == [enabled_id]
+        assert self.registry.get(disabled_id)["enabled"] is False
+        assert self.registry.count() == 2
+
+    def test_list_can_include_disabled_agents_for_admin_views(self):
+        self.registry.register("agent-1", "worker.processor")
+        self.registry.register(
+            "agent-2",
+            "worker.analyzer",
+            config={"disabled": True},
+        )
+
+        agents = self.registry.list(group="worker", include_disabled=True)
+
+        assert len(agents) == 2
+
+    def test_disabling_agent_invalidates_listing_cache(self):
+        agent_id = self.registry.register("agent-1", "worker.processor")
+        assert [
+            agent["id"] for agent in self.registry.list(group="worker")
+        ] == [agent_id]
+
+        assert self.registry.set_enabled(agent_id, False)
+
+        assert self.registry.list(group="worker") == []
+
+    def test_disabled_listing_audit_is_sanitized(self):
+        self.registry.register(
+            "agent-1",
+            "worker.processor",
+            config={"enabled": False, "secret": "private-token"},
+        )
+
+        assert self.registry.list(group="worker") == []
+        records = self.registry.audit_records()
+
+        assert records[-1]["event"] == "registry.disabled_entries_filtered"
+        assert records[-1]["filtered_count"] == 1
+        assert records[-1]["group"] == "worker"
+        assert "private-token" not in str(records[-1])
 
     def test_update_status(self):
         agent_id = self.registry.register("test-agent", "worker.processor")

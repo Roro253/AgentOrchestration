@@ -1,7 +1,7 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, HTTPException
+from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
 
@@ -10,13 +10,25 @@ registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+    include_disabled: bool = False,
+):
     status_filter = AgentStatus(status) if status else None
-    return {"agents": registry.list(status=status_filter, group=group)}
+    return {"agents": registry.list(
+        status=status_filter,
+        group=group,
+        include_disabled=include_disabled,
+    )}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 

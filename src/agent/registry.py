@@ -1,10 +1,11 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from src.common.metrics import metrics
 
 
 class AgentStatus(Enum):
@@ -21,8 +22,18 @@ class AgentRegistry:
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._list_cache: Dict[
+            Tuple[Optional[str], Optional[str], bool],
+            List[Dict[str, Any]],
+        ] = {}
+        self._audit_records: List[Dict[str, Any]] = []
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -31,6 +42,7 @@ class AgentRegistry:
             "type": agent_type,
             "status": AgentStatus.PENDING.value,
             "config": config or {},
+            "enabled": self._config_enabled(config),
             "created_at": timestamp,
             "updated_at": timestamp,
             "version": "1.0.0",
@@ -40,25 +52,55 @@ class AgentRegistry:
         if group not in self._index:
             self._index[group] = []
         self._index[group].append(agent_id)
+        self._invalidate_list_cache()
         return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+        include_disabled: bool = False,
+    ) -> List[Dict[str, Any]]:
+        cache_key = (status.value if status else None, group, include_disabled)
+        if cache_key in self._list_cache:
+            return [agent.copy() for agent in self._list_cache[cache_key]]
+
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
         if group:
             agent_ids = self._index.get(group, [])
             agents = [a for a in agents if a["id"] in agent_ids]
-        return list(agents)
+        agents = list(agents)
+        if not include_disabled:
+            visible_agents = [a for a in agents if a.get("enabled", True)]
+            self._record_filtered_listing(
+                len(agents) - len(visible_agents),
+                status,
+                group,
+            )
+            agents = visible_agents
+
+        self._list_cache[cache_key] = [agent.copy() for agent in agents]
+        return [agent.copy() for agent in agents]
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
         if agent_id not in self._agents:
             return False
         self._agents[agent_id]["status"] = status.value
         self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_list_cache()
+        return True
+
+    def set_enabled(self, agent_id: str, enabled: bool) -> bool:
+        if agent_id not in self._agents:
+            return False
+        self._agents[agent_id]["enabled"] = bool(enabled)
+        self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_list_cache()
         return True
 
     def delete(self, agent_id: str) -> bool:
@@ -68,10 +110,44 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        self._invalidate_list_cache()
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def audit_records(self) -> List[Dict[str, Any]]:
+        return [record.copy() for record in self._audit_records]
+
+    def _invalidate_list_cache(self) -> None:
+        self._list_cache.clear()
+
+    @staticmethod
+    def _config_enabled(config: Optional[Dict]) -> bool:
+        if not config:
+            return True
+        if "enabled" in config:
+            return bool(config["enabled"])
+        if "disabled" in config:
+            return not bool(config["disabled"])
+        return True
+
+    def _record_filtered_listing(
+        self,
+        filtered_count: int,
+        status: Optional[AgentStatus],
+        group: Optional[str],
+    ) -> None:
+        if filtered_count <= 0:
+            return
+        self._audit_records.append({
+            "event": "registry.disabled_entries_filtered",
+            "filtered_count": filtered_count,
+            "status": status.value if status else None,
+            "group": group,
+            "timestamp": time.time(),
+        })
+        metrics.increment("registry.disabled_entries_filtered", filtered_count)
 
 # 2019-01-29T11:24:49 update
 
