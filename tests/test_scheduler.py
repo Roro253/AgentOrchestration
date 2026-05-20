@@ -90,6 +90,77 @@ class TestTaskScheduler:
         )
         assert task_id in self.scheduler._in_flight
 
+    def test_worker_complete_rejects_stale_epoch_after_reconnect(self):
+        registry = AgentRegistry()
+        agent_id = registry.register(
+            "hot-reload-worker",
+            "worker.processor",
+            capabilities=["summarize"],
+        )
+        claimed_snapshot = registry.worker_snapshot(agent_id)
+        task_id = self.scheduler.enqueue({
+            "type": "summarize",
+            "target_agent": agent_id,
+            "required_capability": "summarize",
+        })
+        task = asyncio.run(self.scheduler.claim_for_worker(claimed_snapshot))
+        current_snapshot = registry.refresh_capabilities(
+            agent_id,
+            ["translate"],
+        )
+
+        assert not self.scheduler.complete_for_worker(
+            current_snapshot,
+            task["id"],
+        )
+
+        assert task_id not in self.scheduler._in_flight
+        assert self.scheduler.claim_audit()[-1] == {
+            "event": "worker_ack_rejected",
+            "task_id": task_id,
+            "worker_id": agent_id,
+            "worker_capability_epoch": current_snapshot["capability_epoch"],
+            "action": "complete",
+            "reason": "stale_capability_epoch",
+        }
+        deferred = asyncio.run(self.scheduler.dequeue_unvalidated())
+        assert deferred["id"] == task_id
+        assert deferred["retries"] == 0
+
+    def test_worker_fail_rejects_wrong_worker_without_losing_in_flight_task(
+        self,
+    ):
+        registry = AgentRegistry()
+        agent_id = registry.register("primary-worker", "worker.processor")
+        other_agent_id = registry.register(
+            "other-worker",
+            "worker.processor",
+        )
+        task_id = self.scheduler.enqueue({
+            "type": "summarize",
+            "target_agent": agent_id,
+        })
+        task = asyncio.run(
+            self.scheduler.claim_for_worker(
+                registry.worker_snapshot(agent_id),
+            )
+        )
+
+        assert not self.scheduler.fail_for_worker(
+            registry.worker_snapshot(other_agent_id),
+            task["id"],
+        )
+
+        assert task_id in self.scheduler._in_flight
+        assert self.scheduler.claim_audit()[-1] == {
+            "event": "worker_ack_rejected",
+            "task_id": task_id,
+            "worker_id": other_agent_id,
+            "worker_capability_epoch": 1,
+            "action": "fail",
+            "reason": "worker_mismatch",
+        }
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update

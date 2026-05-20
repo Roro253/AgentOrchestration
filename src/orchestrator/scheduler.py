@@ -153,6 +153,19 @@ class TaskScheduler:
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
 
+    def complete_for_worker(
+        self,
+        worker_snapshot: Dict[str, Any],
+        task_id: str,
+        queue: str = "default",
+    ) -> bool:
+        return self._acknowledge_for_worker(
+            worker_snapshot,
+            task_id,
+            queue,
+            "complete",
+        )
+
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
@@ -161,6 +174,19 @@ class TaskScheduler:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def fail_for_worker(
+        self,
+        worker_snapshot: Dict[str, Any],
+        task_id: str,
+        queue: str = "default",
+    ) -> bool:
+        return self._acknowledge_for_worker(
+            worker_snapshot,
+            task_id,
+            queue,
+            "fail",
+        )
 
     def claim_audit(self) -> List[Dict[str, Any]]:
         return list(self._claim_audit)
@@ -252,6 +278,84 @@ class TaskScheduler:
                 "reason": decision,
             },
         )
+
+    def _acknowledge_for_worker(
+        self,
+        worker_snapshot: Dict[str, Any],
+        task_id: str,
+        queue: str,
+        action: str,
+    ) -> bool:
+        task = self._in_flight.get(task_id)
+        if not task:
+            return False
+
+        decision = self._worker_ack_decision(task, worker_snapshot)
+        if decision == "acknowledge":
+            self._in_flight.pop(task_id, None)
+            if action == "fail":
+                task["retries"] += 1
+                if task["retries"] < self._max_retries:
+                    self._requeue_existing(task, queue)
+            return True
+
+        self._record_ack_decision(task, worker_snapshot, decision, action)
+        if decision in {
+            "stale_capability_epoch",
+            "missing_capability",
+        }:
+            self._in_flight.pop(task_id, None)
+            self._requeue_existing(task, queue)
+        return False
+
+    def _worker_ack_decision(
+        self,
+        task: Dict[str, Any],
+        worker_snapshot: Dict[str, Any],
+    ) -> str:
+        worker_id = worker_snapshot["id"]
+        if task.get("claimed_by") and task["claimed_by"] != worker_id:
+            return "worker_mismatch"
+        decision = self._worker_claim_decision(task, worker_snapshot)
+        if decision == "claim":
+            return "acknowledge"
+        return decision
+
+    def _record_ack_decision(
+        self,
+        task: Dict[str, Any],
+        worker_snapshot: Dict[str, Any],
+        decision: str,
+        action: str,
+    ) -> None:
+        audit = {
+            "event": "worker_ack_rejected",
+            "task_id": task.get("id"),
+            "worker_id": worker_snapshot["id"],
+            "worker_capability_epoch": worker_snapshot["capability_epoch"],
+            "action": action,
+            "reason": decision,
+        }
+        self._claim_audit.append(audit)
+        metrics.increment(f"scheduler.worker_ack.rejected.{decision}")
+        logger.info(
+            "Rejected worker acknowledgement",
+            extra={
+                "task_id": task.get("id"),
+                "worker_id": worker_snapshot["id"],
+                "action": action,
+                "reason": decision,
+            },
+        )
+
+    def _requeue_existing(
+        self,
+        task: Dict[str, Any],
+        queue: str,
+    ) -> None:
+        if queue not in self._queues:
+            self._queues[queue] = PriorityQueue()
+        self._queues[queue].push(task, task.get("priority", 0))
 
 # 2019-04-25T08:37:12 update
 
