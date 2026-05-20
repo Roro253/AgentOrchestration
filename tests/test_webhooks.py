@@ -28,6 +28,10 @@ class TestWebhookDeliveryService:
                 },
                 "payload": {
                     "api_token": "token-value",
+                    "callback_url": (
+                        "https://callback.example.test/hook?"
+                        "token=query-token&safe=visible&signature=rawsig"
+                    ),
                     "message": "failed",
                     "internal_trace_id": "trace-1",
                 },
@@ -44,11 +48,58 @@ class TestWebhookDeliveryService:
         assert record.callback_payload["payload"]["payload"]["api_token"] == (
             REDACTED
         )
+        callback_url = record.log_fields["payload"]["payload"]["callback_url"]
+        assert "safe=visible" in callback_url
+        assert "token=%5BREDACTED%5D" in callback_url
+        assert "signature=%5BREDACTED%5D" in callback_url
         assert "internal_trace_id" not in (
             record.log_fields["payload"]["payload"]
         )
         assert "super-secret-value" not in repr(record.log_fields)
         assert "token-value" not in repr(record.callback_payload)
+        assert "query-token" not in repr(record.log_fields)
+        assert "rawsig" not in repr(record.callback_payload)
+
+    def test_failure_record_is_idempotent_and_sanitized(self):
+        failure = self.service.record_failure(
+            "workspace-1",
+            "endpoint-1",
+            "event-failure",
+            {
+                "error": "timeout",
+                "Authorization": "Bearer failure-token",
+                "delivery_url": (
+                    "https://callback.example.test/retry?"
+                    "token=query-token&attempt=1"
+                ),
+                "internal_stack": "runtime-only",
+            },
+            endpoint_version=1,
+        )
+        duplicate = self.service.record_failure(
+            "workspace-1",
+            "endpoint-1",
+            "event-failure",
+            {
+                "error": "different timeout",
+                "Authorization": "Bearer later-token",
+            },
+            endpoint_version=1,
+        )
+
+        assert failure is duplicate
+        assert not failure.delivered
+        assert failure.status == "failed"
+        assert failure.reason == "delivery_failed"
+        assert failure.log_fields["payload"]["Authorization"] == REDACTED
+        assert "attempt=1" in failure.log_fields["payload"]["delivery_url"]
+        assert "token=%5BREDACTED%5D" in (
+            failure.log_fields["payload"]["delivery_url"]
+        )
+        assert "internal_stack" not in failure.callback_payload["payload"]
+        assert "failure-token" not in repr(failure.log_fields)
+        assert "query-token" not in repr(failure.callback_payload)
+        assert "later-token" not in repr(duplicate.log_fields)
 
     def test_rejected_delivery_is_sanitized_and_not_persisted_as_delivered(
         self,
