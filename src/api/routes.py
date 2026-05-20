@@ -1,22 +1,37 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from typing import Dict, Optional
+
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.task_monitor import (
+    MonitorAuthError,
+    TaskMonitorAuthService,
+    TaskMonitorStore,
+    get_task_monitor_auth_service,
+    get_task_monitor_store,
+)
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +68,40 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.get("/tasks/{task_id}/monitor")
+async def monitor_task(
+    task_id: str,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    workspace_id: Optional[str] = Header(default=None, alias="X-Workspace-ID"),
+    ao_session: Optional[str] = Cookie(default=None),
+    auth_service: TaskMonitorAuthService = Depends(
+        get_task_monitor_auth_service
+    ),
+    store: TaskMonitorStore = Depends(get_task_monitor_store),
+):
+    cookie_header = f"ao_session={ao_session}" if ao_session else None
+    try:
+        principal = auth_service.validate(
+            authorization=authorization,
+            cookie_header=cookie_header,
+            workspace_id=workspace_id,
+        )
+    except MonitorAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    task = store.get(task_id, principal.workspace_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "task_id": task["id"],
+        "status": task.get("status", "unknown"),
+        "workspace_id": principal.workspace_id,
+        "principal": principal.subject,
+        "credential_type": principal.credential_type,
+    }
 
 # 2019-03-18T11:10:18 update
 
