@@ -116,7 +116,8 @@ def cli():
         try:
             _load_manifest(args.manifest)
         except ManifestValidationError as exc:
-            parser.error(str(exc))
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         if args.dry_run:
             print(f"Dry run successful: manifest is valid: {args.manifest}")
             return
