@@ -78,6 +78,9 @@ class AgentExecutor:
     def active_run_files(self) -> Dict[str, Any]:
         return self._run_files.active_run_files()
 
+    def active_cleanup_locks(self) -> Dict[str, Any]:
+        return self._run_files.active_lock_files()
+
     def cancel(self, execution_id: str) -> bool:
         task = self._active_tasks.get(execution_id)
         if task and not task.done():

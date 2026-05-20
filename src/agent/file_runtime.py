@@ -16,8 +16,10 @@ class TemporaryRunFileRuntime:
         self.base_path = Path(runtime_dir)
         self.active_path = self.base_path / "active"
         self.completed_path = self.base_path / "completed"
+        self.locks_path = self.base_path / "locks"
         self.active_path.mkdir(parents=True, exist_ok=True)
         self.completed_path.mkdir(parents=True, exist_ok=True)
+        self.locks_path.mkdir(parents=True, exist_ok=True)
 
     def start_run(
         self,
@@ -31,6 +33,7 @@ class TemporaryRunFileRuntime:
             "task_id": task.get("id"),
             "started_at": time.time(),
         }
+        self._create_lock_file(execution_id)
         path = self._active_file(execution_id)
         self._write_json_atomic(path, payload)
         return path
@@ -45,9 +48,10 @@ class TemporaryRunFileRuntime:
         outcome_path = self._outcome_file(execution_id)
         if outcome_path.exists():
             payload = json.loads(outcome_path.read_text())
-            if self._active_file(execution_id).exists():
-                self._remove_active_file(execution_id, cleanup_retries)
+            if self._has_runtime_file(execution_id):
+                self._remove_runtime_files(execution_id, cleanup_retries)
                 payload["temporary_run_file_cleaned"] = True
+                payload["cleanup_lock_released"] = True
                 self._write_json_atomic(outcome_path, payload)
             return payload
 
@@ -56,13 +60,15 @@ class TemporaryRunFileRuntime:
             "outcome": outcome,
             "finalized_at": time.time(),
             "temporary_run_file_cleaned": False,
+            "cleanup_lock_released": False,
         }
         if error:
             payload["error"] = error
 
         self._write_json_atomic(outcome_path, payload)
-        self._remove_active_file(execution_id, cleanup_retries)
+        self._remove_runtime_files(execution_id, cleanup_retries)
         payload["temporary_run_file_cleaned"] = True
+        payload["cleanup_lock_released"] = True
         self._write_json_atomic(outcome_path, payload)
         return payload
 
@@ -79,18 +85,56 @@ class TemporaryRunFileRuntime:
             if path.is_file()
         }
 
+    def active_lock_files(self) -> Dict[str, Path]:
+        return {
+            path.stem: path
+            for path in self.locks_path.glob("*.lock")
+            if path.is_file()
+        }
+
     def _active_file(self, execution_id: str) -> Path:
         return self.active_path / f"{execution_id}.json"
 
+    def _lock_file(self, execution_id: str) -> Path:
+        return self.locks_path / f"{execution_id}.lock"
+
     def _outcome_file(self, execution_id: str) -> Path:
         return self.completed_path / f"{execution_id}.json"
+
+    def _create_lock_file(self, execution_id: str) -> None:
+        path = self._lock_file(execution_id)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(path, flags)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"execution {execution_id} already has an active run lock"
+            ) from exc
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps({"execution_id": execution_id}))
+
+    def _has_runtime_file(self, execution_id: str) -> bool:
+        return (
+            self._active_file(execution_id).exists()
+            or self._lock_file(execution_id).exists()
+        )
+
+    def _remove_runtime_files(
+        self,
+        execution_id: str,
+        cleanup_retries: int,
+    ) -> None:
+        self._remove_file(self._active_file(execution_id), cleanup_retries)
+        self._remove_file(self._lock_file(execution_id), cleanup_retries)
 
     def _remove_active_file(
         self,
         execution_id: str,
         cleanup_retries: int,
     ) -> None:
-        path = self._active_file(execution_id)
+        self._remove_file(self._active_file(execution_id), cleanup_retries)
+
+    def _remove_file(self, path: Path, cleanup_retries: int) -> None:
         for attempt in range(max(1, cleanup_retries)):
             try:
                 path.unlink(missing_ok=True)
