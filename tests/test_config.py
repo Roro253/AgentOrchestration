@@ -1,5 +1,6 @@
 import pytest
 from src.common.config import Config
+from src.common.errors import ConfigurationError
 
 
 class TestConfig:
@@ -31,6 +32,46 @@ class TestConfig:
         data = config.to_dict()
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
+
+    def test_get_int_from_json_number(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"limits": {"memory_mb": 512}}')
+        config = Config(str(config_file))
+
+        assert config.get_int("limits.memory_mb") == 512
+
+    def test_get_int_from_numeric_string(self):
+        config = Config()
+        config.set("limits.timeout_seconds", "  +30 ")
+
+        assert config.get_int("limits.timeout_seconds") == 30
+
+    def test_get_int_from_env_override_string(self, monkeypatch):
+        monkeypatch.setenv("AO_LIMITS_MAX_RETRIES", "5")
+        config = Config()
+
+        assert config.get_int("limits.max.retries") == 5
+
+    def test_get_int_default_for_missing_key(self):
+        config = Config()
+
+        assert config.get_int("limits.missing", default=7) == 7
+        assert config.get_int("limits.missing") is None
+
+    @pytest.mark.parametrize("value", ["", "4.5", "eight", object()])
+    def test_get_int_rejects_invalid_values(self, value):
+        config = Config()
+        config.set("limits.worker_count", value)
+
+        with pytest.raises(ConfigurationError, match="limits.worker_count"):
+            config.get_int("limits.worker_count")
+
+    def test_get_int_rejects_boolean_values(self):
+        config = Config()
+        config.set("limits.enabled", True)
+
+        with pytest.raises(ConfigurationError, match="not a boolean"):
+            config.get_int("limits.enabled")
 
 # 2019-02-01T18:58:35 update
 
