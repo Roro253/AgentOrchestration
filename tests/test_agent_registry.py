@@ -1,5 +1,5 @@
 import pytest
-from src.agent.registry import AgentRegistry, AgentStatus
+from src.agent.registry import AgentRegistry, AgentStatus, HandlerRoutingError
 
 
 class TestAgentRegistry:
@@ -47,6 +47,64 @@ class TestAgentRegistry:
 
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
+
+    def test_resolve_rejects_unhealthy_handler_during_rolling_deploy(self):
+        old_agent = self.registry.register(
+            "worker-v1",
+            "worker.processor",
+            {"capabilities": ["invoice:read"]},
+        )
+        self.registry.update_status(old_agent, AgentStatus.RUNNING)
+        resolved = self.registry.resolve("worker.processor", ["invoice:read"])
+        assert resolved["id"] == old_agent
+
+        self.registry.update_health(
+            old_agent,
+            healthy=False,
+            reason="rolling deploy drain",
+            accepting_tasks=False,
+        )
+        new_agent = self.registry.register(
+            "worker-v2",
+            "worker.processor",
+            {"capabilities": ["invoice:read"]},
+        )
+        self.registry.update_status(new_agent, AgentStatus.RUNNING)
+
+        resolved = self.registry.resolve("worker.processor", ["invoice:read"])
+
+        assert resolved["id"] == new_agent
+        audit = self.registry.routing_audit()
+        assert any(
+            record["agent_id"] == old_agent and record["reason"] == "unhealthy"
+            for record in audit
+        )
+        assert all("capabilities" not in record for record in audit)
+
+    def test_resolve_denies_capability_incompatible_handler(self):
+        agent_id = self.registry.register(
+            "reader",
+            "worker.processor",
+            {"capabilities": ["invoice:read"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+
+        with pytest.raises(HandlerRoutingError, match="no healthy handler"):
+            self.registry.resolve("worker.processor", ["invoice:write"])
+
+        last_record = self.registry.routing_audit()[-1]
+        assert last_record["reason"] == "missing_capability"
+
+    def test_status_change_invalidates_cached_handler_resolution(self):
+        stale_agent = self.registry.register("worker-v1", "worker.processor")
+        self.registry.update_status(stale_agent, AgentStatus.RUNNING)
+        assert self.registry.resolve("worker.processor")["id"] == stale_agent
+
+        self.registry.update_status(stale_agent, AgentStatus.PAUSED)
+        replacement = self.registry.register("worker-v2", "worker.processor")
+        self.registry.update_status(replacement, AgentStatus.RUNNING)
+
+        assert self.registry.resolve("worker.processor")["id"] == replacement
 
 # 2019-01-23T10:28:57 update
 
