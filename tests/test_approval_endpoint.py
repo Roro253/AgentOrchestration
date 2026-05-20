@@ -111,3 +111,25 @@ def test_approval_endpoint_checks_run_state_before_lookup_or_mutation():
     assert step.approved is False
     assert service.protected_lookup_count == 0
     assert service.mutation_count == 0
+
+
+def test_approval_endpoint_rejects_non_human_step_before_lookup():
+    step = ApprovalStep(
+        run_id="run-1",
+        step_id="step-1",
+        workspace_id="workspace-a",
+        requires_human=False,
+    )
+    service = ApprovalService([step])
+    client = _client_with(service)
+
+    response = client.post(
+        "/api/v2/runs/run-1/steps/step-1/approve",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Approval step not found"
+    assert step.approved is False
+    assert service.protected_lookup_count == 0
+    assert service.mutation_count == 0
