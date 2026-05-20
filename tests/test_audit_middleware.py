@@ -10,6 +10,7 @@ from src.api.middleware import (
     AUDIT_ACTOR_HEADER,
     AUDIT_STATUS_HEADER,
     AuthMiddleware,
+    get_current_audit_actor,
 )
 
 
@@ -43,6 +44,62 @@ def test_authenticated_request_attaches_sanitized_audit_actor(caplog):
     assert response.headers[AUDIT_STATUS_HEADER] == "authenticated"
     assert "raw-secret-token" not in caplog.text
     assert "must-not-log" not in caplog.text
+    assert get_current_audit_actor() is None
+
+
+def test_token_actor_fallback_is_stable_and_non_secret():
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/api/v2/audit-context")
+    async def read_context(request: Request):
+        return {
+            "actor": request.state.audit_actor,
+            "context_actor": get_current_audit_actor(),
+        }
+
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer raw-secret-token"}
+
+    first = client.get("/api/v2/audit-context", headers=headers)
+    second = client.get("/api/v2/audit-context", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    actor = first.json()["actor"]
+    assert actor == second.json()["actor"]
+    assert first.json()["context_actor"] == actor
+    assert actor.startswith("token:")
+    assert "raw-secret-token" not in actor
+    assert first.headers[AUDIT_ACTOR_HEADER] == actor
+    assert get_current_audit_actor() is None
+
+
+def test_token_route_remains_public_without_audit_actor():
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.post("/api/v2/auth/token")
+    async def issue_token(request: Request):
+        return {
+            "has_actor": hasattr(request.state, "audit_actor"),
+            "context_actor": get_current_audit_actor(),
+        }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v2/auth/token",
+        headers={"X-Audit-Actor": "user-123"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers[AUDIT_STATUS_HEADER] == "public"
+    assert AUDIT_ACTOR_HEADER not in response.headers
+    assert response.json() == {
+        "has_actor": False,
+        "context_actor": None,
+    }
+    assert get_current_audit_actor() is None
 
 
 def test_rejected_request_does_not_attach_audit_actor():

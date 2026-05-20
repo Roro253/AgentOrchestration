@@ -4,6 +4,7 @@ import hashlib
 import logging
 import re
 import time
+from contextvars import ContextVar
 from typing import Callable, Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -21,6 +22,10 @@ AUDIT_STATE_FIELDS = (
 AUTH_TOKEN_PATH = "/api/v2/auth/token"
 PROTECTED_API_PREFIX = "/api/v2"
 SAFE_ACTOR_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
+_current_audit_actor: ContextVar[Optional[str]] = ContextVar(
+    "current_audit_actor",
+    default=None,
+)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -33,6 +38,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         actor = None
         outcome = "public"
         status_code = 200
+        audit_actor_token = None
 
         try:
             if _requires_auth(request):
@@ -59,6 +65,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
                 request.state.audit_actor = actor
                 request.state.audit_authenticated = True
+                audit_actor_token = _current_audit_actor.set(actor)
                 outcome = "authenticated"
 
             response = await call_next(request)
@@ -79,12 +86,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 "audit middleware completed",
                 extra=_audit_log_extra(request, actor, outcome, status_code),
             )
+            if audit_actor_token is not None:
+                _current_audit_actor.reset(audit_actor_token)
             _clear_audit_state(request)
 
 
 def _requires_auth(request: Request) -> bool:
     path = request.url.path
     return path.startswith(PROTECTED_API_PREFIX) and path != AUTH_TOKEN_PATH
+
+
+def get_current_audit_actor() -> Optional[str]:
+    return _current_audit_actor.get()
 
 
 def _extract_bearer_token(request: Request) -> Optional[str]:
