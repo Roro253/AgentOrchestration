@@ -37,13 +37,52 @@ def test_deploy_dry_run_rejects_missing_manifest(monkeypatch):
     assert exc.value.code == 2
 
 
-def test_deploy_dry_run_rejects_non_mapping_manifest(tmp_path, monkeypatch):
-    manifest = tmp_path / "agent.yaml"
-    manifest.write_text("- agent\n- worker\n", encoding="utf-8")
+def test_deploy_dry_run_rejects_directory_manifest(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit) as exc:
+        run_cli(monkeypatch, ["deploy", "--dry-run", str(tmp_path)])
+
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents", "error_text"),
+    [
+        ("empty.yaml", "", "manifest is empty"),
+        ("list.yaml", "- agent\n- worker\n", "mapping/object"),
+        ("broken.yaml", "name: [unterminated\n", "syntax is invalid"),
+        ("broken.json", '{"name": "agent"', "syntax is invalid"),
+    ],
+)
+def test_deploy_dry_run_rejects_invalid_manifest_content(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    filename,
+    contents,
+    error_text,
+):
+    manifest = tmp_path / filename
+    manifest.write_text(contents, encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc:
         run_cli(monkeypatch, ["deploy", "--dry-run", str(manifest)])
 
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert error_text in captured.err
+
+
+def test_deploy_rejects_invalid_manifest_before_backend(tmp_path, monkeypatch):
+    manifest = tmp_path / "agent.yaml"
+    manifest.write_text("- agent\n- worker\n", encoding="utf-8")
+    deployed = []
+
+    monkeypatch.setattr(main, "_deploy_agent", deployed.append)
+
+    with pytest.raises(SystemExit) as exc:
+        run_cli(monkeypatch, ["deploy", str(manifest)])
+
+    assert deployed == []
     assert exc.value.code == 2
 
 
