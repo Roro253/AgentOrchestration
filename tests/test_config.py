@@ -58,6 +58,19 @@ class TestConfig:
         assert config.get("app.port") == 8080
         assert config.get("database.host") == "db.internal"
 
+    def test_unscoped_ao_env_does_not_override_file_config(
+        self, monkeypatch, tmp_path
+    ):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"app": {"name": "file"}}')
+        monkeypatch.setenv("AO_APP_NAME", "legacy-unscoped")
+        monkeypatch.setenv("AO_CONFIG_APP_PORT", "9090")
+
+        config = Config(str(config_file))
+
+        assert config.get("app.name") == "file"
+        assert config.get("app.port") == "9090"
+
 # 2019-02-01T18:58:35 update
 
 # 2019-07-31T13:45:15 update
