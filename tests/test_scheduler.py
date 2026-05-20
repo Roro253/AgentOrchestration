@@ -1,4 +1,3 @@
-import pytest
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -29,6 +28,71 @@ class TestTaskScheduler:
         import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.complete(task["id"])
+
+    def test_complete_task_commits_artifact_manifest(self):
+        self.scheduler.enqueue({"type": "test"})
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+
+        assert self.scheduler.complete(
+            task["id"],
+            result={"ok": True},
+            artifact_manifest={
+                "artifacts": [
+                    {"path": "reports/out.json", "sha256": "abc123"},
+                ],
+            },
+        )
+
+        completed = self.scheduler.get_completed(task["id"])
+        assert completed is not None
+        assert completed["status"] == "completed"
+        assert completed["result"] == {"ok": True}
+        assert completed["artifact_manifest"] == {
+            "artifacts": [
+                {"path": "reports/out.json", "sha256": "abc123"},
+            ],
+        }
+
+    def test_finalizing_task_is_hidden_until_manifest_commit(self):
+        self.scheduler.enqueue({"type": "test"})
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+        observed_during_commit = []
+
+        def writer(task_id, manifest):
+            completed = self.scheduler.get_completed(task_id)
+            observed_during_commit.append(completed)
+            return f"stored:{task_id}"
+
+        assert self.scheduler.complete(
+            task["id"],
+            artifact_manifest={"artifacts": [{"path": "result.txt"}]},
+            manifest_writer=writer,
+        )
+
+        assert observed_during_commit == [None]
+        assert (
+            self.scheduler.get_completed(task["id"])["artifact_manifest_ref"]
+            == f"stored:{task['id']}"
+        )
+
+    def test_manifest_write_failure_does_not_complete_task(self):
+        self.scheduler.enqueue({"type": "test"})
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+
+        def writer(task_id, manifest):
+            raise RuntimeError("manifest store unavailable")
+
+        assert not self.scheduler.complete(
+            task["id"],
+            artifact_manifest={"artifacts": [{"path": "result.txt"}]},
+            manifest_writer=writer,
+        )
+        assert self.scheduler.get_completed(task["id"]) is None
+        assert task["id"] in self.scheduler._in_flight
+        assert not self.scheduler._artifact_manifests
 
     def test_fail_task_with_retry(self):
         self.scheduler.enqueue({"type": "test"})

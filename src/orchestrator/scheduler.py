@@ -1,9 +1,9 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
+import copy
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -35,9 +35,17 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._finalizing: Dict[str, Dict] = {}
+        self._completed: Dict[str, Dict] = {}
+        self._artifact_manifests: Dict[str, Dict] = {}
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
@@ -48,15 +56,28 @@ class TaskScheduler:
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid for tid, scheduled_at in self._scheduled.items()
+            if scheduled_at <= now
+        ]
         for tid in expired:
             task = self._scheduled.pop(tid)
             if task:
@@ -69,8 +90,74 @@ class TaskScheduler:
                 return task
         return None
 
-    def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+    def complete(
+        self,
+        task_id: str,
+        result: Optional[Any] = None,
+        artifact_manifest: Optional[Dict] = None,
+        manifest_writer: Optional[Callable[[str, Dict], Optional[str]]] = None,
+    ) -> bool:
+        task = self._in_flight.get(task_id)
+        if task is None:
+            return False
+
+        manifest = copy.deepcopy(
+            artifact_manifest
+            or task.get("artifact_manifest")
+            or {"artifacts": []}
+        )
+        self._finalizing[task_id] = task
+        try:
+            manifest_ref = self._commit_artifact_manifest(
+                task_id,
+                manifest,
+                manifest_writer,
+            )
+            completed = copy.deepcopy(task)
+            completed["status"] = "completed"
+            completed["result"] = result
+            completed["artifact_manifest_ref"] = manifest_ref
+            completed["completed_at"] = time.time()
+
+            self._completed[task_id] = completed
+            self._in_flight.pop(task_id, None)
+            return True
+        except Exception:
+            return False
+        finally:
+            self._finalizing.pop(task_id, None)
+
+    def _commit_artifact_manifest(
+        self,
+        task_id: str,
+        artifact_manifest: Dict,
+        manifest_writer: Optional[Callable[[str, Dict], Optional[str]]] = None,
+    ) -> str:
+        manifest_ref = (
+            manifest_writer(task_id, copy.deepcopy(artifact_manifest))
+            if manifest_writer
+            else None
+        )
+        manifest_ref = manifest_ref or f"artifact-manifest:{task_id}"
+        self._artifact_manifests[manifest_ref] = copy.deepcopy(
+            artifact_manifest
+        )
+        return manifest_ref
+
+    def get_completed(self, task_id: str) -> Optional[Dict]:
+        completed = self._completed.get(task_id)
+        if completed is None:
+            return None
+
+        record = copy.deepcopy(completed)
+        manifest_ref = record["artifact_manifest_ref"]
+        record["artifact_manifest"] = copy.deepcopy(
+            self._artifact_manifests[manifest_ref]
+        )
+        return record
+
+    def list_completed(self) -> List[Dict]:
+        return [self.get_completed(task_id) for task_id in self._completed]
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
