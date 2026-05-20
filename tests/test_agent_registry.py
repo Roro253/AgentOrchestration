@@ -59,6 +59,22 @@ class TestAgentRegistry:
         assert agent is not None
         assert agent["name"] == "safe-worker"
 
+    def test_resolve_authorized_normalizes_permission_inputs(self):
+        agent_id = self.registry.register(
+            "safe-worker",
+            "worker.processor",
+            {"permissions": [" Tasks:Run ", "tasks:run"]},
+        )
+
+        agent = self.registry.resolve_authorized(
+            "worker.processor",
+            " TASKS:RUN ",
+        )
+
+        assert agent is not None
+        assert agent["id"] == agent_id
+        assert agent["config"]["permissions"] == ["tasks:run"]
+
     def test_permission_change_invalidates_cached_resolution(self):
         agent_id = self.registry.register(
             "safe-worker",
@@ -110,6 +126,30 @@ class TestAgentRegistry:
             for event in self.registry.audit_events()
         ]
         assert "cache_invalidated" in decisions
+
+    def test_delete_invalidates_cached_authorized_resolution(self):
+        agent_id = self.registry.register(
+            "safe-worker",
+            "worker.processor",
+            {"permissions": ["tasks:run"]},
+        )
+        cached = self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        )
+        assert cached["id"] == agent_id
+
+        assert self.registry.delete(agent_id)
+
+        assert self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        ) is None
+        decisions = [
+            event["decision"]
+            for event in self.registry.audit_events()
+        ]
+        assert "denied" in decisions
 
     def test_delete_agent(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
