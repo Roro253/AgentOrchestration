@@ -1,0 +1,51 @@
+name: Publish package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish from the checked-out protected ref
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate without publishing
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate protected publish ref before registry auth
+        run: python scripts/validate_publish_ref.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build backend
+        run: python -m pip install --upgrade build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        if: github.event_name == 'push' || inputs.dry_run == 'false'
+        uses: pypa/gh-action-pypi-publish@v1.12.4
