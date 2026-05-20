@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -39,6 +38,78 @@ class TestAgentRegistry:
         assert self.registry.update_status(agent_id, AgentStatus.RUNNING)
         agent = self.registry.get(agent_id)
         assert agent["status"] == "running"
+
+    def test_resolve_authorized_agent_by_permission(self):
+        self.registry.register(
+            "safe-worker",
+            "worker.processor",
+            {"permissions": ["tasks:run"]},
+        )
+        self.registry.register(
+            "readonly-worker",
+            "worker.processor",
+            {"permissions": ["tasks:read"]},
+        )
+
+        agent = self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        )
+
+        assert agent is not None
+        assert agent["name"] == "safe-worker"
+
+    def test_permission_change_invalidates_cached_resolution(self):
+        agent_id = self.registry.register(
+            "safe-worker",
+            "worker.processor",
+            {"permissions": ["tasks:run"]},
+        )
+        first_resolution = self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        )
+        assert first_resolution["id"] == agent_id
+
+        assert self.registry.update_permissions(agent_id, ["tasks:read"])
+        second_resolution = self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        )
+
+        assert second_resolution is None
+        decisions = [
+            event["decision"]
+            for event in self.registry.audit_events()
+        ]
+        assert "permissions_changed" in decisions
+        assert "denied" in decisions
+
+    def test_cached_resolution_rechecks_permission_version(self):
+        agent_id = self.registry.register(
+            "safe-worker",
+            "worker.processor",
+            {"permissions": ["tasks:run"]},
+        )
+        cached = self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        )
+        assert cached["id"] == agent_id
+
+        agent = self.registry.get(agent_id)
+        agent["config"]["permissions"] = []
+        agent["permission_version"] += 1
+
+        assert self.registry.resolve_authorized(
+            "worker.processor",
+            "tasks:run",
+        ) is None
+        decisions = [
+            event["decision"]
+            for event in self.registry.audit_events()
+        ]
+        assert "cache_invalidated" in decisions
 
     def test_delete_agent(self):
         agent_id = self.registry.register("test-agent", "worker.processor")
