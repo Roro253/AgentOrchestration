@@ -71,6 +71,14 @@ class DeletionCompletion:
         return {entry.data_class for entry in self.stores}
 
 
+@dataclass(frozen=True)
+class DeletionVerification:
+    workspace_id: str
+    verified_at: float
+    complete: bool
+    remaining_record_ids: Dict[str, List[str]]
+
+
 class RetentionDeletionService:
     def __init__(self, stores: Iterable[RetentionStore]):
         self._stores = {store.name: store for store in stores}
@@ -151,6 +159,29 @@ class RetentionDeletionService:
         workspace_id: str,
     ) -> Optional[DeletionCompletion]:
         return self._completions.get(workspace_id)
+
+    def verify_completion(
+        self,
+        completion: DeletionCompletion,
+    ) -> DeletionVerification:
+        source_id_set = set(completion.requested_ids)
+        remaining: Dict[str, List[str]] = {}
+        for entry in completion.stores:
+            store = self._stores.get(entry.store)
+            if not store:
+                remaining[entry.store] = completion.requested_ids
+                continue
+
+            record_ids = self._matching_record_ids(store, source_id_set)
+            if record_ids:
+                remaining[entry.store] = record_ids
+
+        return DeletionVerification(
+            workspace_id=completion.workspace_id,
+            verified_at=time.time(),
+            complete=not remaining,
+            remaining_record_ids=remaining,
+        )
 
     def _matching_record_ids(
         self,

@@ -83,3 +83,49 @@ class TestRetentionDeletionService:
         assert completed["primary_artifacts"] == []
         assert completed["derived_embeddings"] == ["embed-stale"]
         assert completed["derived_indexes"] == ["index-stale"]
+
+    def test_repeated_deletion_records_empty_store_completion(self):
+        self.artifacts.add("task-a")
+        self.artifacts.add("task-live")
+        self.embeddings.add("embed-a", source_id="task-a")
+        self.embeddings.add("embed-live", source_id="task-live")
+        self.indexes.add("index-a", source_id="task-a")
+
+        first_completion = self.service.delete_workspace_data(
+            "workspace-1",
+            ["task-a"],
+        )
+        second_completion = self.service.delete_workspace_data(
+            "workspace-1",
+            ["task-a", "task-missing"],
+        )
+
+        assert self.service.verify_completion(first_completion).complete
+        assert self.service.verify_completion(second_completion).complete
+        assert "task-live" in self.artifacts.records
+        assert "embed-live" in self.embeddings.records
+        completed = {
+            entry.data_class: entry.record_ids
+            for entry in second_completion.stores
+        }
+        assert completed["primary_artifacts"] == []
+        assert completed["derived_embeddings"] == []
+        assert completed["derived_indexes"] == []
+        assert second_completion.requested_ids == ["task-a", "task-missing"]
+
+    def test_verify_completion_detects_incomplete_derived_store(self):
+        self.artifacts.add("task-a")
+        self.embeddings.add("embed-a", source_id="task-a")
+        completion = self.service.delete_workspace_data(
+            "workspace-1",
+            ["task-a"],
+        )
+        self.indexes.add("index-stale", source_id="task-a")
+
+        verification = self.service.verify_completion(completion)
+
+        assert not verification.complete
+        assert verification.workspace_id == "workspace-1"
+        assert verification.remaining_record_ids == {
+            "search_index": ["index-stale"],
+        }
