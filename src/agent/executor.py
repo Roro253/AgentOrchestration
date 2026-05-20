@@ -5,31 +5,55 @@ import time
 from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
+from src.agent.file_runtime import TemporaryRunFileRuntime
+
 
 class AgentExecutor:
-    def __init__(self, max_concurrent: int = 5):
+    def __init__(
+        self,
+        max_concurrent: int = 5,
+        run_file_runtime: Optional[TemporaryRunFileRuntime] = None,
+    ):
         self.max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._results: Dict[str, Any] = {}
+        self._run_files = run_file_runtime or TemporaryRunFileRuntime()
 
-    async def execute(self, agent_id: str, task: Dict[str, Any], handler: Callable) -> str:
+    async def execute(
+        self,
+        agent_id: str,
+        task: Dict[str, Any],
+        handler: Callable,
+    ) -> str:
         execution_id = str(uuid4())
         async with self._semaphore:
+            self._run_files.start_run(execution_id, agent_id, task)
             task_obj = asyncio.create_task(
                 self._run_execution(execution_id, agent_id, task, handler)
             )
             self._active_tasks[execution_id] = task_obj
             try:
                 result = await task_obj
+                self._run_files.finalize_run(execution_id, "completed")
                 self._results[execution_id] = result
+            except asyncio.CancelledError:
+                self._run_files.finalize_run(execution_id, "cancelled")
+                self._results[execution_id] = {"cancelled": True}
             except Exception as e:
+                self._run_files.finalize_run(execution_id, "failed", str(e))
                 self._results[execution_id] = {"error": str(e)}
             finally:
                 self._active_tasks.pop(execution_id, None)
         return execution_id
 
-    async def _run_execution(self, exec_id: str, agent_id: str, task: Dict, handler: Callable) -> Any:
+    async def _run_execution(
+        self,
+        exec_id: str,
+        agent_id: str,
+        task: Dict,
+        handler: Callable,
+    ) -> Any:
         start = time.time()
         result = await handler(agent_id, task)
         duration = time.time() - start
@@ -45,6 +69,15 @@ class AgentExecutor:
     def get_result(self, execution_id: str) -> Optional[Any]:
         return self._results.get(execution_id)
 
+    def get_cleanup_outcome(
+        self,
+        execution_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        return self._run_files.get_outcome(execution_id)
+
+    def active_run_files(self) -> Dict[str, Any]:
+        return self._run_files.active_run_files()
+
     def cancel(self, execution_id: str) -> bool:
         task = self._active_tasks.get(execution_id)
         if task and not task.done():
@@ -56,7 +89,10 @@ class AgentExecutor:
         for task in self._active_tasks.values():
             task.cancel()
         if self._active_tasks:
-            await asyncio.gather(*self._active_tasks.values(), return_exceptions=True)
+            await asyncio.gather(
+                *self._active_tasks.values(),
+                return_exceptions=True,
+            )
 
 # 2019-01-31T14:19:34 update
 
