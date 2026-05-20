@@ -127,6 +127,30 @@ def test_rejected_request_does_not_attach_audit_actor():
     assert not called["handler"]
 
 
+def test_empty_bearer_token_rejects_before_handler_without_audit_actor():
+    app = FastAPI()
+    add_auth_audit_middleware(app)
+    called = {"handler": False}
+
+    @app.get("/api/v2/agents")
+    async def read_agents(request: Request):
+        called["handler"] = True
+        return {"actor": request.state.audit_actor}
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/v2/agents",
+        headers={"Authorization": "Bearer   "},
+    )
+
+    assert response.status_code == 401
+    assert response.text == "Unauthorized"
+    assert response.headers[AUDIT_STATUS_HEADER] == "rejected"
+    assert AUDIT_ACTOR_HEADER not in response.headers
+    assert not called["handler"]
+    assert get_current_audit_actor() is None
+
+
 def test_invalid_actor_fails_closed_before_handler():
     app = FastAPI()
     add_auth_audit_middleware(app)
