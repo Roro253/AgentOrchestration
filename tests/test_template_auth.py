@@ -88,6 +88,17 @@ class TestTemplateCloneAuthorization:
         assert template_service.template_reads == 0
         assert template_service.clone_writes == 0
 
+    def test_disabled_principal_is_denied_and_invalidated(self):
+        self.register_principal("disabled-token", disabled=True)
+
+        response = self.clone("disabled-token")
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == "disabled"
+        assert session_store.get("disabled-token") is None
+        assert template_service.template_reads == 0
+        assert template_service.clone_writes == 0
+
     def test_insufficient_scope_is_denied_before_template_read(self):
         self.register_principal("scope-token", scopes=["templates:read"])
 
@@ -105,6 +116,21 @@ class TestTemplateCloneAuthorization:
 
         assert response.status_code == 403
         assert response.json()["detail"] == "insufficient_role"
+        assert template_service.template_reads == 0
+        assert template_service.clone_writes == 0
+
+    def test_wrong_workspace_role_is_denied_before_template_read(self):
+        self.register_principal(
+            "wrong-workspace-token",
+            roles={"workspace-2": "admin"},
+        )
+
+        response = self.clone("wrong-workspace-token")
+        records = template_authorization.audit_records()
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "insufficient_role"
+        assert records[-1]["workspace_id"] == "workspace-1"
         assert template_service.template_reads == 0
         assert template_service.clone_writes == 0
 
